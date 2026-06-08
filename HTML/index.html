@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CT 伪影分割系统</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <!-- nifti-reader-js: parse .nii / .nii.gz in browser -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+  <style>
+    :root {
+      --bg:       #080a0d;
+      --surface:  #0f1217;
+      --surface2: #161b22;
+      --border:   #1e252f;
+      --accent:   #00e5c3;
+      --accent2:  #0077ff;
+      --danger:   #ff4757;
+      --success:  #00d68f;
+      --warn:     #ffa940;
+      --text:     #dde3ea;
+      --dim:      #8a95a0;
+      --muted:    #4a5260;
+      --overlay:  rgba(0,229,195,0.55);   /* mask highlight colour */
+      --mono: 'DM Mono', monospace;
+      --sans: 'Syne', sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* subtle grid bg */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image:
+        linear-gradient(rgba(0,229,195,0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,195,0.025) 1px, transparent 1px);
+      background-size: 44px 44px;
+      pointer-events: none; z-index: 0;
+    }
+
+    /* ── Header ── */
+    header {
+      position: sticky; top: 0; z-index: 100;
+      padding: 0 36px;
+      height: 56px;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      background: rgba(8,10,13,0.85);
+      backdrop-filter: blur(14px);
+    }
+
+    .logo {
+      display: flex; align-items: center; gap: 10px;
+      font-family: var(--sans); font-weight: 800; font-size: 16px;
+    }
+    .logo-mark {
+      width: 30px; height: 30px;
+      border: 1.5px solid var(--accent); border-radius: 7px;
+      display: grid; place-items: center;
+      background: rgba(0,229,195,0.06);
+    }
+    .logo em { font-style: normal; color: var(--accent); }
+
+    .hdr-right { display: flex; align-items: center; gap: 14px; }
+
+    .status-pill {
+      display: flex; align-items: center; gap: 7px;
+      padding: 5px 12px;
+      border: 1px solid var(--border); border-radius: 100px;
+      font-size: 11px; color: var(--dim);
+      background: var(--surface);
+    }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); transition: .3s; }
+    .dot.on  { background: var(--success); box-shadow: 0 0 6px var(--success); }
+    .dot.err { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+
+    /* ── Layout ── */
+    .app {
+      position: relative; z-index: 5;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      grid-template-rows: 100vh;
+      height: calc(100vh - 56px);
+    }
+
+    /* ── Sidebar ── */
+    aside {
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      display: flex; flex-direction: column;
+      overflow-y: auto;
+      padding: 24px 20px;
+      gap: 20px;
+    }
+
+    .section-label {
+      font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 10px;
+    }
+
+    /* Upload zone */
+    .upload-zone {
+      border: 1.5px dashed var(--border); border-radius: 12px;
+      padding: 28px 16px; text-align: center; cursor: pointer;
+      transition: all .25s; position: relative;
+    }
+    .upload-zone:hover, .upload-zone.over {
+      border-color: var(--accent);
+      background: rgba(0,229,195,0.03);
+    }
+    .upload-zone input {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer;
+      width: 100%; height: 100%;
+    }
+    .upload-icon {
+      width: 42px; height: 42px; margin: 0 auto 12px;
+      background: rgba(0,229,195,0.07); border-radius: 10px;
+      border: 1px solid rgba(0,229,195,0.18);
+      display: grid; place-items: center;
+    }
+    .upload-title { font-family: var(--sans); font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+    .upload-sub   { font-size: 11px; color: var(--dim); }
+
+    .file-badge {
+      display: none; margin-top: 12px;
+      padding: 8px 12px;
+      background: rgba(0,229,195,0.06); border: 1px solid rgba(0,229,195,0.18);
+      border-radius: 8px; font-size: 11px; color: var(--accent);
+      align-items: center; gap: 7px; word-break: break-all;
+    }
+    .file-badge.show { display: flex; }
+
+    /* Options */
+    .opt-block { display: flex; flex-direction: column; gap: 12px; }
+
+    .opt-row { display: flex; flex-direction: column; gap: 6px; }
+    .opt-row label { font-size: 11px; color: var(--dim); }
+    .opt-row input[type=text] {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 9px 12px;
+      font-family: var(--mono); font-size: 12px; color: var(--text);
+      outline: none; transition: border-color .2s;
+    }
+    .opt-row input[type=text]:focus { border-color: rgba(0,229,195,.35); }
+
+    .toggle-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 12px;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    }
+    .toggle-row span { font-size: 12px; color: var(--text); }
+    .tog { position: relative; width: 38px; height: 20px; }
+    .tog input { opacity: 0; width: 0; height: 0; }
+    .tog-sl {
+      position: absolute; inset: 0; background: var(--border); border-radius: 100px;
+      cursor: pointer; transition: .25s;
+    }
+    .tog-sl::before {
+      content: ''; position: absolute;
+      width: 14px; height: 14px; top: 3px; left: 3px;
+      background: var(--dim); border-radius: 50%; transition: .25s;
+    }
+    .tog input:checked + .tog-sl { background: rgba(0,229,195,.25); }
+    .tog input:checked + .tog-sl::before { transform: translateX(18px); background: var(--accent); }
+
+    /* Buttons */
+    .btn {
+      width: 100%; padding: 12px; border: none; border-radius: 10px;
+      cursor: pointer; font-family: var(--sans); font-weight: 700; font-size: 13px;
+      transition: all .2s; position: relative;
+    }
+    .btn-primary { background: var(--accent); color: #080a0d; }
+    .btn-primary:hover:not(:disabled) {
+      background: #00ffd6; transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(0,229,195,.22);
+    }
+    .btn-primary:disabled { opacity: .35; cursor: not-allowed; }
+
+    .btn-ghost {
+      background: transparent; color: var(--accent);
+      border: 1px solid rgba(0,229,195,.25);
+      margin-top: 8px;
+    }
+    .btn-ghost:hover:not(:disabled) { background: rgba(0,229,195,.06); border-color: var(--accent); }
+    .btn-ghost:disabled { opacity: .3; cursor: not-allowed; }
+
+    /* Progress */
+    .prog-wrap { display: none; margin-top: 12px; }
+    .prog-wrap.show { display: block; }
+    .prog-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--dim); margin-bottom: 7px; }
+    .prog-bar { height: 3px; background: var(--border); border-radius: 100px; overflow: hidden; }
+    .prog-fill {
+      height: 100%; border-radius: 100px; width: 0%;
+      background: linear-gradient(90deg, var(--accent2), var(--accent));
+      transition: width .3s;
+    }
+    .prog-fill.indeterminate {
+      width: 35%;
+      animation: indeterminate 1.4s ease-in-out infinite;
+    }
+    @keyframes indeterminate {
+      0%   { transform: translateX(-120%); }
+      100% { transform: translateX(380%); }
+    }
+
+    /* Alert */
+    .alert { display: none; padding: 10px 13px; border-radius: 8px; font-size: 11px; line-height: 1.6; margin-top: 10px; }
+    .alert.show { display: flex; align-items: flex-start; gap: 8px; }
+    .alert-ok  { background: rgba(0,214,143,.07); border: 1px solid rgba(0,214,143,.2); color: var(--success); }
+    .alert-err { background: rgba(255,71,87,.07);  border: 1px solid rgba(255,71,87,.2);  color: var(--danger); }
+
+    /* Log */
+    .log-box {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 10px 12px;
+      font-size: 11px; line-height: 1.9; color: var(--dim);
+      max-height: 140px; overflow-y: auto; flex-shrink: 0;
+    }
+    .log-box p { display: flex; gap: 7px; }
+    .lt { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+    .lok { color: var(--success); }
+    .lerr { color: var(--danger); }
+    .linf { color: var(--accent2); }
+
+    /* ── Viewer area ── */
+    .viewer-area {
+      display: flex; flex-direction: column;
+      background: #050608;
+      overflow: hidden;
+    }
+
+    .viewer-toolbar {
+      height: 48px; flex-shrink: 0;
+      display: flex; align-items: center; gap: 14px;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .vt-label {
+      font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted);
+    }
+
+    .slice-info {
+      font-family: var(--mono); font-size: 12px; color: var(--accent);
+      min-width: 80px;
+    }
+
+    .view-tabs {
+      display: flex; gap: 4px; margin-left: auto;
+    }
+    .vtab {
+      padding: 5px 13px; border-radius: 6px; font-size: 11px; font-family: var(--sans);
+      font-weight: 600; cursor: pointer; border: 1px solid var(--border);
+      background: transparent; color: var(--dim); transition: all .2s;
+    }
+    .vtab.active {
+      background: rgba(0,229,195,.1); border-color: rgba(0,229,195,.3); color: var(--accent);
+    }
+
+    .opacity-row {
+      display: flex; align-items: center; gap: 8px; margin-left: 12px;
+    }
+    .opacity-row label { font-size: 11px; color: var(--dim); }
+
+    /* magnifier */
+    #magnifier {
+      position: absolute;
+      width: 160px; height: 160px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,71,87,.8);
+      box-shadow: 0 0 0 1px rgba(0,0,0,.6), 0 4px 20px rgba(0,0,0,.5);
+      pointer-events: none;
+      display: none;
+      z-index: 50;
+      background: #000;
+      overflow: hidden;
+    }
+    #magnifier canvas { position: absolute; top:0; left:0; width:100%; height:100%; image-rendering:pixelated; }
+    .mag-btn {
+      padding: 5px 12px; border-radius: 6px; font-size: 11px; font-family: var(--sans);
+      font-weight: 600; cursor: pointer; border: 1px solid var(--border);
+      background: transparent; color: var(--dim); transition: all .2s; margin-left: 4px;
+    }
+    .mag-btn.active { background: rgba(255,71,87,.12); border-color: rgba(255,71,87,.4); color: #ff6b78; }
+
+    /* model selector */
+    .model-selector {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    }
+    .model-option {
+      position: relative; cursor: pointer;
+    }
+    .model-option input { position: absolute; opacity: 0; width: 0; height: 0; }
+    .model-card {
+      display: flex; flex-direction: column; gap: 3px;
+      padding: 10px 12px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 9px; transition: all .2s; cursor: pointer;
+    }
+    .model-option input:checked + .model-card {
+      border-color: rgba(0,229,195,.45);
+      background: rgba(0,229,195,.06);
+    }
+    .model-card-name {
+      font-family: var(--sans); font-weight: 700; font-size: 12px; color: var(--text);
+    }
+    .model-card-desc {
+      font-size: 10px; color: var(--muted); line-height: 1.4;
+    }
+    .model-option input:checked + .model-card .model-card-name { color: var(--accent); }
+
+    input[type=range] {
+      -webkit-appearance: none; appearance: none;
+      width: 80px; height: 3px; border-radius: 3px;
+      background: var(--border); outline: none; cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 13px; height: 13px; border-radius: 50%;
+      background: var(--accent); cursor: pointer;
+    }
+
+    /* canvas panels */
+    .canvases {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      gap: 0; overflow: hidden; position: relative;
+    }
+
+    .canvas-panel {
+      flex: 1; height: 100%;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      position: relative;
+    }
+
+    .canvas-panel + .canvas-panel {
+      border-left: 1px solid var(--border);
+    }
+
+    .panel-label {
+      position: absolute; top: 12px; left: 14px;
+      font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+      color: rgba(0,229,195,.5); font-family: var(--mono);
+      pointer-events: none; z-index: 2;
+    }
+
+    canvas {
+      max-width: 100%; max-height: 100%;
+      image-rendering: pixelated;
+      display: block;
+    }
+
+    /* Empty state */
+    .empty-state {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px; color: var(--muted);
+      pointer-events: none;
+    }
+    .empty-state svg { opacity: .25; }
+    .empty-state p { font-size: 12px; letter-spacing: .5px; }
+
+    /* Slice slider */
+    .slice-bar {
+      flex-shrink: 0; padding: 12px 24px;
+      display: flex; align-items: center; gap: 14px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .slice-bar label { font-size: 11px; color: var(--dim); white-space: nowrap; }
+    #slice-slider {
+      flex: 1; width: auto;
+    }
+    .slice-badge {
+      font-size: 12px; color: var(--accent);
+      min-width: 70px; text-align: right;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* ── Page tabs (header) ── */
+    .page-tabs { display: flex; gap: 4px; }
+    .ptab {
+      padding: 6px 16px; border-radius: 7px; font-size: 12px;
+      font-family: var(--sans); font-weight: 600; cursor: pointer;
+      border: 1px solid transparent; background: transparent;
+      color: var(--dim); transition: all .2s;
+    }
+    .ptab.active { background: rgba(0,229,195,.1); border-color: rgba(0,229,195,.3); color: var(--accent); }
+    .ptab:hover:not(.active) { color: var(--text); border-color: var(--border); }
+
+    /* ── Cluster page ── */
+    .page { display: none; }
+    .page.active { display: flex; }
+
+    .cluster-layout {
+      width: 100%; height: calc(100vh - 56px);
+      display: grid; grid-template-columns: 280px 1fr;
+    }
+
+    .cluster-sidebar {
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      padding: 24px 20px;
+      display: flex; flex-direction: column; gap: 18px;
+      overflow-y: auto;
+    }
+
+    .patient-list {
+      display: flex; flex-direction: column; gap: 6px;
+      max-height: 220px; overflow-y: auto;
+    }
+    .patient-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 11px;
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+      font-size: 11px;
+    }
+    .patient-item-id { color: var(--accent); font-family: var(--mono); }
+    .patient-item-del {
+      background: none; border: none; cursor: pointer;
+      color: var(--muted); font-size: 13px; line-height: 1;
+      padding: 0 2px; transition: color .2s;
+    }
+    .patient-item-del:hover { color: var(--danger); }
+
+    .patient-empty {
+      text-align: center; font-size: 11px; color: var(--muted);
+      padding: 16px 0;
+    }
+
+    .num-input-row {
+      display: flex; align-items: center; gap: 10px;
+    }
+    .num-input-row label { font-size: 11px; color: var(--dim); white-space: nowrap; }
+    .num-input {
+      width: 60px; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 7px; padding: 7px 10px; font-family: var(--mono); font-size: 12px;
+      color: var(--text); outline: none; text-align: center;
+    }
+    .num-input:focus { border-color: rgba(0,229,195,.35); }
+
+    /* Cluster colour legend */
+    .cluster-legend {
+      display: flex; flex-direction: column; gap: 7px; margin-top: 4px;
+    }
+    .legend-item {
+      display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--dim);
+    }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
+    /* Scatter canvas area */
+    .scatter-area {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      position: relative; background: #050608; overflow: hidden;
+    }
+    .scatter-area canvas { display: block; }
+    .scatter-empty {
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+      color: var(--muted); pointer-events: none;
+    }
+    .scatter-empty svg { opacity: .2; }
+    .scatter-empty p { font-size: 12px; }
+
+    /* Tooltip */
+    #scatter-tooltip {
+      position: absolute; display: none;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 12px;
+      font-size: 11px; color: var(--text); pointer-events: none;
+      white-space: nowrap; z-index: 20;
+      box-shadow: 0 4px 16px rgba(0,0,0,.4);
+    }
+    #scatter-tooltip b { color: var(--accent); }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <div class="logo">
+    <div class="logo-mark">
+      <svg width="16" height="16" fill="none" viewBox="0 0 16 16">
+        <rect x="1" y="1" width="6" height="6" rx="1" fill="#00e5c3" opacity=".9"/>
+        <rect x="9" y="1" width="6" height="6" rx="1" fill="#00e5c3" opacity=".4"/>
+        <rect x="1" y="9" width="6" height="6" rx="1" fill="#00e5c3" opacity=".4"/>
+        <rect x="9" y="9" width="6" height="6" rx="1" fill="#00e5c3" opacity=".15"/>
+      </svg>
+    </div>
+    CT <em>伪影分割系统</em>
+  </div>
+  <div class="hdr-right">
+    <div class="page-tabs">
+      <button class="ptab active" data-page="infer">CT 分割</button>
+      <button class="ptab"        data-page="cluster">聚类分析</button>
+    </div>
+    <div class="status-pill">
+      <span class="dot" id="dot"></span>
+      <span id="svc-txt">检查服务...</span>
+    </div>
+  </div>
+</header>
+
+<div class="page active" id="page-infer">
+<div class="app">
+
+  <!-- ── Sidebar ── -->
+  <aside>
+    <div>
+      <div class="section-label">上传 CT 文件</div>
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" id="file-input" accept=".nii,.nii.gz" />
+        <div class="upload-icon">
+          <svg width="20" height="20" fill="none" viewBox="0 0 20 20">
+            <path d="M10 3v9M7 6l3-3 3 3" stroke="#00e5c3" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M3 14v1.5A1.5 1.5 0 004.5 17h11a1.5 1.5 0 001.5-1.5V14" stroke="#00e5c3" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="upload-title">拖拽或点击上传</div>
+        <div class="upload-sub">.nii &nbsp;/&nbsp; .nii.gz</div>
+      </div>
+      <div class="file-badge" id="file-badge">
+        <svg width="13" height="13" fill="none" viewBox="0 0 13 13">
+          <rect x="1.5" y=".5" width="10" height="12" rx="1.5" stroke="#00e5c3" stroke-width="1.1"/>
+          <path d="M3.5 4.5h6M3.5 6.5h6M3.5 8.5h4" stroke="#00e5c3" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+        <span id="file-name">—</span>
+      </div>
+    </div>
+
+    <div class="opt-block">
+      <div class="section-label">推理参数</div>
+      <div class="opt-row">
+        <label>模型选择</label>
+        <div class="model-selector">
+          <label class="model-option">
+            <input type="radio" name="model-type" value="unet2d" checked />
+            <div class="model-card">
+              <span class="model-card-name">UNet2D</span>
+              <span class="model-card-desc">标准分割，速度快</span>
+            </div>
+          </label>
+          <label class="model-option">
+            <input type="radio" name="model-type" value="attention_unet2d" />
+            <div class="model-card">
+              <span class="model-card-name">Attention</span>
+              <span class="model-card-desc">注意力机制，精度更高</span>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="opt-row">
+        <label>输出掩码文件名</label>
+        <input type="text" id="mask-filename" value="artifact_mask.nii.gz" />
+      </div>
+      <div class="toggle-row">
+        <span>保存掩码文件</span>
+        <label class="tog">
+          <input type="checkbox" id="save-mask" checked />
+          <span class="tog-sl"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- ── Patient feature block ── -->
+    <div class="opt-block">
+      <div class="section-label">患者特征管理</div>
+      <div class="opt-row">
+        <label>患者编号</label>
+        <input type="text" id="patient-id" placeholder="如 P001" />
+      </div>
+      <div class="toggle-row">
+        <span>推理后保存特征</span>
+        <label class="tog">
+          <input type="checkbox" id="save-feature" checked />
+          <span class="tog-sl"></span>
+        </label>
+      </div>
+      <div class="toggle-row" style="margin-top:0">
+        <span>自动录入聚类库</span>
+        <label class="tog">
+          <input type="checkbox" id="auto-register" checked />
+          <span class="tog-sl"></span>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <button class="btn btn-primary" id="infer-btn" disabled>开始推理</button>
+      <button class="btn btn-ghost"   id="dl-btn"    disabled>↓ 下载掩码文件</button>
+
+      <div class="prog-wrap" id="prog-wrap">
+        <div class="prog-head">
+          <span id="prog-txt">正在推理...</span>
+          <span id="prog-pct"></span>
+        </div>
+        <div class="prog-bar"><div class="prog-fill indeterminate" id="prog-fill"></div></div>
+      </div>
+
+      <div class="alert alert-ok"  id="a-ok"><svg width="14" height="14" fill="none" viewBox="0 0 14 14" style="flex-shrink:0;margin-top:1px"><circle cx="7" cy="7" r="5.5" stroke="#00d68f" stroke-width="1.2"/><path d="M4.5 7l2 2 3-3" stroke="#00d68f" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="a-ok-t"></span></div>
+      <div class="alert alert-err" id="a-err"><svg width="14" height="14" fill="none" viewBox="0 0 14 14" style="flex-shrink:0;margin-top:1px"><circle cx="7" cy="7" r="5.5" stroke="#ff4757" stroke-width="1.2"/><path d="M7 4.5v3M7 9.5v.3" stroke="#ff4757" stroke-width="1.2" stroke-linecap="round"/></svg><span id="a-err-t"></span></div>
+    </div>
+
+    <div style="flex:1"></div>
+
+    <div>
+      <div class="section-label">运行日志</div>
+      <div class="log-box" id="log"></div>
+    </div>
+  </aside>
+
+  <!-- ── Viewer ── -->
+  <div class="viewer-area">
+
+    <!-- toolbar -->
+    <div class="viewer-toolbar">
+      <span class="vt-label">视图</span>
+      <div class="view-tabs">
+        <button class="vtab active" data-mode="split">对比视图</button>
+        <button class="vtab"        data-mode="ct">原始 CT</button>
+        <button class="vtab"        data-mode="overlay">叠加视图</button>
+      </div>
+      <div class="opacity-row">
+        <label>窗宽</label>
+        <input type="range" id="ww-slider" min="1" max="100" value="100" title="窗宽：值越小图像对比越强" />
+        <label style="margin-left:8px">窗位</label>
+        <input type="range" id="wl-slider" min="0" max="100" value="50" title="窗位：左移变暗，右移变亮" />
+      </div>
+      <button class="mag-btn" id="mag-btn" title="放大镜（仅叠加视图可用）">🔍 放大镜</button>
+      <span class="slice-info" id="slice-info">— / —</span>
+    </div>
+
+    <!-- canvas area -->
+    <div class="canvases" id="canvases">
+      <!-- empty placeholder -->
+      <div class="empty-state" id="empty-state">
+        <svg width="64" height="64" fill="none" viewBox="0 0 64 64">
+          <rect x="8" y="8" width="48" height="48" rx="6" stroke="#4a5260" stroke-width="2"/>
+          <circle cx="32" cy="32" r="14" stroke="#4a5260" stroke-width="2"/>
+          <circle cx="32" cy="32" r="5"  fill="#4a5260"/>
+          <path d="M32 10v8M32 46v8M10 32h8M46 32h8" stroke="#4a5260" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <p>上传 CT 文件以开始浏览</p>
+      </div>
+
+      <!-- magnifier -->
+      <div id="magnifier"><canvas id="mag-canvas"></canvas></div>
+
+      <!-- split: left = CT, right = overlay -->
+      <div class="canvas-panel" id="panel-left" style="display:none">
+        <span class="panel-label">原始 CT</span>
+        <canvas id="canvas-ct"></canvas>
+      </div>
+      <div class="canvas-panel" id="panel-right" style="display:none">
+        <span class="panel-label">伪影叠加</span>
+        <canvas id="canvas-ov"></canvas>
+      </div>
+    </div>
+
+    <!-- slice slider -->
+    <div class="slice-bar" id="slice-bar" style="display:none">
+      <label>切片</label>
+      <input type="range" id="slice-slider" min="0" value="0" />
+      <span class="slice-badge" id="slice-badge">0 / 0</span>
+    </div>
+
+  </div><!-- /viewer-area -->
+</div><!-- /app -->
+</div><!-- /page-infer -->
+
+<!-- ── Cluster page ── -->
+<div class="page" id="page-cluster">
+  <div class="cluster-layout">
+
+    <div class="cluster-sidebar">
+      <div>
+        <div class="section-label">已录入患者</div>
+        <div class="patient-list" id="patient-list">
+          <div class="patient-empty" id="patient-empty">暂无患者数据</div>
+        </div>
+      </div>
+
+      <div class="opt-block">
+        <div class="section-label">聚类设置</div>
+        <div class="num-input-row">
+          <label>聚类数 K</label>
+          <input type="number" class="num-input" id="cluster-k" value="2" min="2" max="10" />
+        </div>
+        <button class="btn btn-primary" id="cluster-btn">运行聚类分析</button>
+        <div class="prog-wrap" id="cl-prog-wrap">
+          <div class="prog-head"><span id="cl-prog-txt">正在聚类...</span></div>
+          <div class="prog-bar"><div class="prog-fill indeterminate" id="cl-prog-fill"></div></div>
+        </div>
+        <div class="alert alert-err" id="cl-err" style="margin-top:10px">
+          <svg width="14" height="14" fill="none" viewBox="0 0 14 14" style="flex-shrink:0"><circle cx="7" cy="7" r="5.5" stroke="#ff4757" stroke-width="1.2"/><path d="M7 4.5v3M7 9.5v.3" stroke="#ff4757" stroke-width="1.2" stroke-linecap="round"/></svg>
+          <span id="cl-err-t"></span>
+        </div>
+      </div>
+
+      <div>
+        <div class="section-label">图例</div>
+        <div class="cluster-legend" id="cluster-legend">
+          <div class="patient-empty">运行聚类后显示</div>
+        </div>
+      </div>
+
+      <div style="flex:1"></div>
+
+      <div style="font-size:10px;color:var(--muted);line-height:1.7">
+        t-SNE 降维可视化<br/>
+        鼠标悬停查看患者编号<br/>
+        需至少 3 名患者
+      </div>
+    </div>
+
+    <!-- scatter area -->
+    <div class="scatter-area" id="scatter-area">
+      <div class="scatter-empty" id="scatter-empty">
+        <svg width="56" height="56" fill="none" viewBox="0 0 56 56">
+          <circle cx="14" cy="42" r="5" stroke="#4a5260" stroke-width="1.5"/>
+          <circle cx="28" cy="18" r="5" stroke="#4a5260" stroke-width="1.5"/>
+          <circle cx="42" cy="36" r="5" stroke="#4a5260" stroke-width="1.5"/>
+          <circle cx="20" cy="28" r="5" stroke="#4a5260" stroke-width="1.5"/>
+          <circle cx="38" cy="14" r="5" stroke="#4a5260" stroke-width="1.5"/>
+        </svg>
+        <p>录入患者数据后运行聚类</p>
+      </div>
+      <canvas id="scatter-canvas" style="display:none"></canvas>
+      <div id="scatter-tooltip"></div>
+    </div>
+
+  </div>
+</div><!-- /page-cluster -->
+
+<!-- ── nifti reader (minimal inline parser) ── -->
+<script>
+// ───────────────────────────────────────────────
+//  Minimal NIfTI-1 parser (supports .nii + .nii.gz via pako)
+// ───────────────────────────────────────────────
+const NiftiParser = {
+  async parse(arrayBuffer, filename) {
+    let buf = arrayBuffer;
+    if (filename.endsWith('.gz') || filename.endsWith('.nii.gz')) {
+      buf = pako.inflate(new Uint8Array(buf)).buffer;
+    }
+    const dv = new DataView(buf);
+    // detect byte order from sizeof_hdr (should be 348)
+    const le = (dv.getInt32(0, true) === 348);
+    const read16 = o => dv.getInt16(o, le);
+    const read32 = o => dv.getInt32(o, le);
+    const readF  = o => dv.getFloat32(o, le);
+
+    const ndim = read16(40);
+    const dims = [0,1,2,3,4,5,6,7].map(i => read16(40 + i*2));
+    const datatype = read16(70);
+    const vox_offset = readF(108);
+    const offset = Math.max(vox_offset, 352);
+
+    // dim[1..3] = X,Y,Z
+    const nx = dims[1], ny = dims[2], nz = dims[3] || 1;
+
+    const dataOffset = offset;
+    let TypedArray;
+    switch (datatype) {
+      case 2:   TypedArray = Uint8Array;   break;
+      case 4:   TypedArray = Int16Array;   break;
+      case 8:   TypedArray = Int32Array;   break;
+      case 16:  TypedArray = Float32Array; break;
+      case 64:  TypedArray = Float64Array; break;
+      case 512: TypedArray = Uint16Array;  break;
+      default:  TypedArray = Int16Array;
+    }
+    const data = new TypedArray(buf, dataOffset);
+    return { nx, ny, nz, data, datatype };
+  },
+
+  // Returns a Float32Array normalised 0-1 for one axial slice (z)
+  getSlice(vol, z) {
+    const { nx, ny, data } = vol;
+    const slice = new Float32Array(nx * ny);
+    const base  = z * nx * ny;
+    let mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < nx * ny; i++) {
+      const v = data[base + i];
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    const range = mx - mn || 1;
+    for (let i = 0; i < nx * ny; i++) {
+      slice[i] = (data[base + i] - mn) / range;
+    }
+    return slice;
+  },
+
+  getMaskSlice(vol, z) {
+    const { nx, ny, data } = vol;
+    const base = z * nx * ny;
+    const slice = new Uint8Array(nx * ny);
+    for (let i = 0; i < nx * ny; i++) {
+      slice[i] = data[base + i] > 0 ? 1 : 0;
+    }
+    return slice;
+  }
+};
+
+// ───────────────────────────────────────────────
+//  App state
+// ───────────────────────────────────────────────
+const API = 'http://127.0.0.1:8000';
+
+let ctVol   = null;   // parsed CT volume
+let maskVol = null;   // parsed mask volume
+let curSlice = 0;
+let viewMode = 'split'; // 'split' | 'ct' | 'overlay'
+let maskOpacity = 0.5;
+let dlBlob = null;
+
+// windowing: ww=window width (1-100%), wl=window level/center (0-100%)
+let winWidth = 1.0;   // fraction of full range
+let winLevel = 0.5;   // fraction (centre)
+let magActive = false;
+
+// ── DOM ──
+const dot      = document.getElementById('dot');
+const svcTxt   = document.getElementById('svc-txt');
+const fileInput = document.getElementById('file-input');
+const uploadZone= document.getElementById('upload-zone');
+const fileBadge = document.getElementById('file-badge');
+const fileNameEl= document.getElementById('file-name');
+const inferBtn  = document.getElementById('infer-btn');
+const dlBtn     = document.getElementById('dl-btn');
+const saveMaskEl= document.getElementById('save-mask');
+const maskFnEl  = document.getElementById('mask-filename');
+const progWrap  = document.getElementById('prog-wrap');
+const progTxt   = document.getElementById('prog-txt');
+const progFill  = document.getElementById('prog-fill');
+const aOk       = document.getElementById('a-ok');
+const aOkT      = document.getElementById('a-ok-t');
+const aErr      = document.getElementById('a-err');
+const aErrT     = document.getElementById('a-err-t');
+const logEl     = document.getElementById('log');
+const sliceBar  = document.getElementById('slice-bar');
+const sliceSlider=document.getElementById('slice-slider');
+const sliceBadge= document.getElementById('slice-badge');
+const sliceInfo = document.getElementById('slice-info');
+const emptyState= document.getElementById('empty-state');
+const panelLeft = document.getElementById('panel-left');
+const panelRight= document.getElementById('panel-right');
+const canvasCT  = document.getElementById('canvas-ct');
+const canvasOV  = document.getElementById('canvas-ov');
+const wwSlider  = document.getElementById('ww-slider');
+const wlSlider  = document.getElementById('wl-slider');
+const magBtn    = document.getElementById('mag-btn');
+const magnifier = document.getElementById('magnifier');
+const magCanvas = document.getElementById('mag-canvas');
+const vtabs     = document.querySelectorAll('.vtab');
+
+// ── Health check ──
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API}/health`);
+    const d = await r.json();
+    if (d.status === 'success') {
+      dot.className = 'dot on';
+      svcTxt.textContent = `在线 · ${d.device.toUpperCase()}`;
+    } else throw 0;
+  } catch {
+    dot.className = 'dot err';
+    svcTxt.textContent = '服务离线';
+  }
+}
+checkHealth();
+setInterval(checkHealth, 30000);
+
+// ── Log ──
+function log(msg, type = '') {
+  const now = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  const p = document.createElement('p');
+  p.innerHTML = `<span class="lt">${now}</span><span class="${type ? 'l'+type : ''}">${msg}</span>`;
+  logEl.appendChild(p);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ── Alerts ──
+function ok(msg)  { aOk.classList.add('show'); aOkT.textContent = msg; aErr.classList.remove('show'); }
+function err(msg) { aErr.classList.add('show'); aErrT.textContent = msg; aOk.classList.remove('show'); }
+function clearAlerts() { aOk.classList.remove('show'); aErr.classList.remove('show'); }
+
+// ── File selection ──
+let selectedFile = null;
+
+function onFile(file) {
+  if (!file) return;
+  if (!file.name.endsWith('.nii') && !file.name.endsWith('.nii.gz')) {
+    err('仅支持 .nii 或 .nii.gz 格式'); return;
+  }
+  selectedFile = file;
+  fileNameEl.textContent = file.name;
+  fileBadge.classList.add('show');
+  inferBtn.disabled = false;
+  clearAlerts();
+  // Parse CT immediately for preview
+  parseCT(file);
+}
+
+fileInput.addEventListener('change', e => onFile(e.target.files[0]));
+uploadZone.addEventListener('dragover',  e => { e.preventDefault(); uploadZone.classList.add('over'); });
+uploadZone.addEventListener('dragleave', ()=> uploadZone.classList.remove('over'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault(); uploadZone.classList.remove('over');
+  onFile(e.dataTransfer.files[0]);
+});
+
+// ── Parse CT for preview ──
+async function parseCT(file) {
+  log(`解析 CT 文件：${file.name}`, 'inf');
+  try {
+    const buf = await file.arrayBuffer();
+    ctVol = await NiftiParser.parse(buf, file.name);
+    maskVol = null;
+    curSlice = Math.floor(ctVol.nz / 2);
+    setupSlider();
+    showViewer();
+    renderSlice();
+    log(`CT 解析完成，维度：${ctVol.nx}×${ctVol.ny}×${ctVol.nz}`, 'ok');
+  } catch(e) {
+    log(`CT 解析失败：${e.message}`, 'err');
+  }
+}
+
+// ── Parse mask ──
+async function parseMask(blob, filename) {
+  log('解析掩码文件...', 'inf');
+  try {
+    const buf = await blob.arrayBuffer();
+    maskVol = await NiftiParser.parse(buf, filename);
+    log(`掩码解析完成，维度：${maskVol.nx}×${maskVol.ny}×${maskVol.nz}`, 'ok');
+    renderSlice();
+  } catch(e) {
+    log(`掩码解析失败：${e.message}`, 'err');
+  }
+}
+
+// ── Viewer setup ──
+function setupSlider() {
+  sliceSlider.max   = ctVol.nz - 1;
+  sliceSlider.value = curSlice;
+  sliceBadge.textContent = `${curSlice + 1} / ${ctVol.nz}`;
+  sliceInfo.textContent  = `${curSlice + 1} / ${ctVol.nz}`;
+}
+
+function showViewer() {
+  emptyState.style.display = 'none';
+  sliceBar.style.display   = 'flex';
+  applyViewMode();
+}
+
+// ── Render ──
+function renderSlice() {
+  if (!ctVol) return;
+  const { nx, ny } = ctVol;
+  const ctSlice   = NiftiParser.getSlice(ctVol, curSlice);
+  const maskSlice = (maskVol && maskVol.nz > curSlice)
+                    ? NiftiParser.getMaskSlice(maskVol, curSlice)
+                    : null;
+
+  // Determine visible canvases
+  const showLeft  = (viewMode === 'split' || viewMode === 'ct');
+  const showRight = (viewMode === 'split' || viewMode === 'overlay');
+
+  if (showLeft)  drawCT(canvasCT,  nx, ny, ctSlice);
+  if (showRight) drawOverlay(canvasOV, nx, ny, ctSlice, maskSlice);
+}
+
+// Apply window-width / window-level to a normalised 0-1 value → 0-255
+function applyWindow(norm) {
+  // wl = centre (0-1), ww = half-width (0-1)
+  const lo = winLevel - winWidth / 2;
+  const hi = winLevel + winWidth / 2;
+  if (hi === lo) return norm >= hi ? 255 : 0;
+  const v = (norm - lo) / (hi - lo);
+  return Math.round(Math.max(0, Math.min(1, v)) * 255);
+}
+
+function drawCT(canvas, nx, ny, ctSlice) {
+  canvas.width  = nx;
+  canvas.height = ny;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(nx, ny);
+  for (let i = 0; i < nx * ny; i++) {
+    const v = applyWindow(ctSlice[i]);
+    img.data[i*4]   = v;
+    img.data[i*4+1] = v;
+    img.data[i*4+2] = v;
+    img.data[i*4+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function drawOverlay(canvas, nx, ny, ctSlice, maskSlice) {
+  canvas.width  = nx;
+  canvas.height = ny;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(nx, ny);
+  for (let i = 0; i < nx * ny; i++) {
+    const v = applyWindow(ctSlice[i]);
+    if (maskSlice && maskSlice[i] > 0) {
+      // red overlay: rgb(255, 0, 0)
+      const a = maskOpacity;
+      img.data[i*4]   = Math.round(v * (1-a) + 255 * a);
+      img.data[i*4+1] = Math.round(v * (1-a) + 0   * a);
+      img.data[i*4+2] = Math.round(v * (1-a) + 0   * a);
+    } else {
+      img.data[i*4]   = v;
+      img.data[i*4+1] = v;
+      img.data[i*4+2] = v;
+    }
+    img.data[i*4+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ── View mode ──
+function applyViewMode() {
+  if (viewMode === 'split') {
+    panelLeft.style.display  = 'flex';
+    panelRight.style.display = 'flex';
+  } else if (viewMode === 'ct') {
+    panelLeft.style.display  = 'flex';
+    panelRight.style.display = 'none';
+  } else {
+    panelLeft.style.display  = 'none';
+    panelRight.style.display = 'flex';
+  }
+  renderSlice();
+}
+
+vtabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    vtabs.forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    viewMode = tab.dataset.mode;
+    if (ctVol) applyViewMode();
+  });
+});
+
+// ── Slice slider ──
+sliceSlider.addEventListener('input', () => {
+  curSlice = parseInt(sliceSlider.value);
+  sliceBadge.textContent = `${curSlice + 1} / ${ctVol.nz}`;
+  sliceInfo.textContent  = `${curSlice + 1} / ${ctVol.nz}`;
+  renderSlice();
+});
+
+// Mouse wheel on viewer
+document.getElementById('canvases').addEventListener('wheel', e => {
+  if (!ctVol) return;
+  e.preventDefault();
+  curSlice = Math.max(0, Math.min(ctVol.nz - 1, curSlice + (e.deltaY > 0 ? 1 : -1)));
+  sliceSlider.value = curSlice;
+  sliceBadge.textContent = `${curSlice + 1} / ${ctVol.nz}`;
+  sliceInfo.textContent  = `${curSlice + 1} / ${ctVol.nz}`;
+  renderSlice();
+}, { passive: false });
+
+// ── Windowing sliders ──
+wwSlider.addEventListener('input', () => {
+  winWidth = wwSlider.value / 100;
+  if (ctVol) renderSlice();
+});
+wlSlider.addEventListener('input', () => {
+  winLevel = wlSlider.value / 100;
+  if (ctVol) renderSlice();
+});
+
+// ── Magnifier ──
+magBtn.addEventListener('click', () => {
+  magActive = !magActive;
+  magBtn.classList.toggle('active', magActive);
+  if (!magActive) magnifier.style.display = 'none';
+});
+
+const ZOOM = 4;       // magnification factor
+const MAG_R = 80;     // radius px (half of 160px circle)
+
+function drawMagnifier(srcCanvas, mouseX, mouseY) {
+  if (!magActive || !ctVol) return;
+
+  // position lens centred on cursor, offset so it doesn't block the view
+  const offsetX = mouseX + MAG_R + 20 > srcCanvas.parentElement.offsetWidth  ? -MAG_R * 2 - 20 : 20;
+  const offsetY = mouseY - MAG_R < 0 ? 10 : -MAG_R;
+
+  magnifier.style.left    = (srcCanvas.parentElement.offsetLeft + mouseX + offsetX) + 'px';
+  magnifier.style.top     = (srcCanvas.parentElement.offsetTop  + mouseY + offsetY) + 'px';
+  magnifier.style.display = 'block';
+
+  // map mouse px back to canvas pixel coords
+  const rect   = srcCanvas.getBoundingClientRect();
+  const scaleX = srcCanvas.width  / rect.width;
+  const scaleY = srcCanvas.height / rect.height;
+  // We need the mouse position relative to the canvas element
+  // mouseX/mouseY here are relative to the panel; adjust by canvas offset within panel
+  const canvasOffX = srcCanvas.offsetLeft;
+  const canvasOffY = srcCanvas.offsetTop;
+  const cx = (mouseX - canvasOffX) * scaleX;
+  const cy = (mouseY - canvasOffY) * scaleY;
+
+  // sample region
+  const halfSrc = MAG_R / ZOOM;
+  const sx = cx - halfSrc;
+  const sy = cy - halfSrc;
+
+  const mc   = magCanvas.getContext('2d');
+  mc.canvas.width  = MAG_R * 2;
+  mc.canvas.height = MAG_R * 2;
+  mc.imageSmoothingEnabled = false;
+  mc.drawImage(srcCanvas, sx, sy, halfSrc * 2, halfSrc * 2, 0, 0, MAG_R * 2, MAG_R * 2);
+
+  // crosshair
+  mc.strokeStyle = 'rgba(255,255,255,0.5)';
+  mc.lineWidth = 0.5;
+  mc.beginPath();
+  mc.moveTo(MAG_R, 0); mc.lineTo(MAG_R, MAG_R * 2);
+  mc.moveTo(0, MAG_R); mc.lineTo(MAG_R * 2, MAG_R);
+  mc.stroke();
+}
+
+// attach mousemove to both panels
+function attachMagnifier(panel, canvas) {
+  panel.addEventListener('mousemove', e => {
+    if (!magActive) return;
+    const rect = panel.getBoundingClientRect();
+    drawMagnifier(canvas, e.clientX - rect.left, e.clientY - rect.top);
+  });
+  panel.addEventListener('mouseleave', () => {
+    magnifier.style.display = 'none';
+  });
+}
+attachMagnifier(panelLeft,  canvasCT);
+attachMagnifier(panelRight, canvasOV);
+
+// ── Infer ──
+inferBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  clearAlerts();
+  inferBtn.disabled = true;
+  dlBtn.disabled = true;
+  dlBlob = null;
+  progWrap.classList.add('show');
+  progFill.classList.add('indeterminate');
+  progTxt.textContent = '正在上传并推理...';
+
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  const fname      = maskFnEl.value.trim() || 'artifact_mask.nii.gz';
+  const doSave     = saveMaskEl.checked;
+  const modelType  = document.querySelector('input[name="model-type"]:checked').value;
+  const doFeature  = document.getElementById('save-feature').checked;
+  const autoReg    = document.getElementById('auto-register').checked;
+  const pid        = document.getElementById('patient-id').value.trim();
+  const featFname  = pid ? `${pid}_feature.npy` : 'ct_feature.npy';
+
+  log(`开始推理：${selectedFile.name}（模型：${modelType}）`, 'inf');
+  if (doFeature && !pid) log('未填写患者编号，特征将以默认文件名保存', 'inf');
+
+  const form = new FormData();
+  form.append('file', selectedFile);
+
+  try {
+    const url = `${API}/infer/nii?save_mask=${doSave}&mask_filename=${encodeURIComponent(fname)}&model_type=${encodeURIComponent(modelType)}&save_feature=${doFeature}&feature_filename=${encodeURIComponent(featFname)}`;
+    const res = await fetch(url, { method: 'POST', body: form });
+
+    progFill.classList.remove('indeterminate');
+    progFill.style.width = '100%';
+    progTxt.textContent  = '推理完成';
+
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({ detail: '未知错误' }));
+      throw new Error(e.detail || `HTTP ${res.status}`);
+    }
+
+    if (doSave) {
+      const blob = await res.blob();
+      dlBlob = blob;
+      dlBtn.disabled = false;
+      log(`掩码已生成：${fname}`, 'ok');
+
+      // Check feature extraction from response header
+      const featShape = res.headers.get('Feature-Shape');
+      if (doFeature && featShape && featShape !== 'None') {
+        log(`特征向量已提取，维度：${featShape}`, 'ok');
+        // If patient ID given and auto-register: call /extract/feature to get .npy then save
+        if (pid && autoReg) {
+          try {
+            const featForm = new FormData();
+            featForm.append('file', selectedFile);
+            const featRes = await fetch(
+              `${API}/extract/feature?model_type=${encodeURIComponent(modelType)}&feature_filename=${encodeURIComponent(featFname)}&return_average=true`,
+              { method: 'POST', body: featForm }
+            );
+            if (featRes.ok) {
+              const featBlob = await featRes.blob();
+              const saveResult = await savePatientFeature(pid, featBlob, featFname);
+              await new Promise(resolve => setTimeout(resolve, 200));
+              await loadPatientListFromBackend();
+              log(`患者 ${pid} 特征已录入聚类库 ✓`, 'ok');
+            }
+          } catch(fe) {
+            log(`特征录入失败：${fe.message}`, 'err');
+          }
+        }
+      }
+
+      ok(`推理成功！已自动加载掩码叠加视图。`);
+      await parseMask(blob, fname);
+      vtabs.forEach(t => t.classList.remove('active'));
+      document.querySelector('[data-mode="split"]').classList.add('active');
+      viewMode = 'split';
+      applyViewMode();
+    } else {
+      const data = await res.json();
+      log(`伪影像素数：${data.artifact_pixel_count?.toLocaleString()}`, 'ok');
+      if (data.feature_shape) log(`特征维度：${data.feature_shape}`, 'ok');
+      ok('推理完成（未保存文件，无法加载掩码叠加）');
+    }
+  } catch(e) {
+    progFill.style.width = '0%';
+    log(`推理失败：${e.message}`, 'err');
+    err(`推理失败：${e.message}`);
+  } finally {
+    inferBtn.disabled = false;
+    setTimeout(() => { progWrap.classList.remove('show'); progFill.style.width = '0%'; }, 2500);
+  }
+});
+
+// ── Download ──
+dlBtn.addEventListener('click', () => {
+  if (!dlBlob) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(dlBlob);
+  a.download = maskFnEl.value.trim() || 'artifact_mask.nii.gz';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  log('掩码文件已下载', 'ok');
+});
+
+
+// 🔥 新增：从后端加载已保存的患者列表
+async function loadPatientListFromBackend() {
+  try {
+    const res = await fetch(`${API}/patients/list`);
+    if (!res.ok) throw new Error('获取患者列表失败');
+    const data = await res.json();
+
+    // 🔥 清空本地缓存，完全同步后端状态
+    Object.keys(patientRegistry).forEach(key => delete patientRegistry[key]);
+
+
+    // 填充后端返回的患者
+    data.patients.forEach(pid => {
+      patientRegistry[pid] = true;
+    });
+
+    log(`已从后端加载 ${data.count} 个患者特征`, 'ok');
+    renderPatientList();
+  } catch(e) {
+    log(`加载患者列表失败：${e.message}`, 'err');
+  }
+}
+
+// ── Patient state (in-memory, mirrors backend cache) ──
+const patientRegistry = {}; // pid → true (list for UI)
+
+function renderPatientList() {
+  const list  = document.getElementById('patient-list');
+  const empty = document.getElementById('patient-empty');
+  const pids  = Object.keys(patientRegistry);
+  // remove old items
+  list.querySelectorAll('.patient-item').forEach(el => el.remove());
+  if (pids.length === 0) {
+    empty.style.display = 'block';
+  } else {
+    empty.style.display = 'none';
+    pids.forEach(pid => {
+      const div = document.createElement('div');
+      div.className = 'patient-item';
+      div.innerHTML = `<span class="patient-item-id">${pid}</span>
+        <button class="patient-item-del" data-pid="${pid}" title="移除">✕</button>`;
+      list.appendChild(div);
+    });
+    list.querySelectorAll('.patient-item-del').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const pid = btn.dataset.pid;
+        try {
+          // 🔥 调用后端删除接口
+          const res = await fetch(`${API}/patients/${encodeURIComponent(pid)}`, {
+            method: 'DELETE'
+          });
+
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || '删除失败');
+          }
+
+          // 从本地缓存删除
+          delete patientRegistry[pid];
+          renderPatientList();
+          log(`患者 ${pid} 已删除`, 'ok');
+        } catch(e) {
+          log(`删除患者 ${pid} 失败：${e.message}`, 'err');
+        }
+      });
+    });
+  }
+}
+
+// ── Page switching ──
+const ptabs = document.querySelectorAll('.ptab');
+ptabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    ptabs.forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + tab.dataset.page).classList.add('active');
+    if (tab.dataset.page === 'cluster') {
+      loadPatientListFromBackend();  // 🔥 切换到聚类页面时刷新患者列表
+    }
+  });
+});
+
+// 🔥 新增：页面加载时也尝试获取一次患者列表
+window.addEventListener('DOMContentLoaded', () => {
+  loadPatientListFromBackend();
+});
+
+// ── Save feature to backend ──
+async function savePatientFeature(pid, featureBlob, featureFilename) {
+  const form = new FormData();
+  form.append('feature_file', featureBlob, featureFilename);
+  const res = await fetch(`${API}/save/patient_feature?patient_id=${encodeURIComponent(pid)}`, {
+    method: 'POST', body: form
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({ detail: '未知错误' }));
+    throw new Error(e.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Cluster colours (up to 10) ──
+const CLUSTER_COLORS = [
+  '#00e5c3','#ff4757','#0077ff','#ffa940','#b37feb',
+  '#00d68f','#ff6b9d','#40a9ff','#ffec3d','#73d13d'
+];
+
+// ── Run cluster analysis ──
+document.getElementById('cluster-btn').addEventListener('click', async () => {
+  const clErr     = document.getElementById('cl-err');
+  const clErrT    = document.getElementById('cl-err-t');
+  const clProg    = document.getElementById('cl-prog-wrap');
+  const clFill    = document.getElementById('cl-prog-fill');
+  const clBtn     = document.getElementById('cluster-btn');
+  const k         = parseInt(document.getElementById('cluster-k').value) || 2;
+
+  clErr.classList.remove('show');
+  clProg.classList.add('show');
+  clFill.classList.add('indeterminate');
+  clBtn.disabled = true;
+
+  try {
+    const res = await fetch(`${API}/cluster/analysis?cluster_num=${k}`);
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({ detail: '未知错误' }));
+      throw new Error(e.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    renderScatter(data.cluster_result, k);
+    renderLegend(k);
+  } catch(e) {
+    clErr.classList.add('show');
+    clErrT.textContent = e.message;
+  } finally {
+    clProg.classList.remove('show');
+    clFill.classList.remove('indeterminate');
+    clBtn.disabled = false;
+  }
+});
+
+function renderLegend(k) {
+  const leg = document.getElementById('cluster-legend');
+  leg.innerHTML = '';
+  for (let i = 0; i < k; i++) {
+    const div = document.createElement('div');
+    div.className = 'legend-item';
+    div.innerHTML = `<span class="legend-dot" style="background:${CLUSTER_COLORS[i % CLUSTER_COLORS.length]}"></span>
+      <span>簇 ${i + 1}</span>`;
+    leg.appendChild(div);
+  }
+}
+
+function renderScatter(points, k) {
+  const area    = document.getElementById('scatter-area');
+  const canvas  = document.getElementById('scatter-canvas');
+  const empty   = document.getElementById('scatter-empty');
+  const tooltip = document.getElementById('scatter-tooltip');
+
+  empty.style.display  = 'none';
+  canvas.style.display = 'block';
+
+  const W = area.offsetWidth  || 800;
+  const H = area.offsetHeight || 600;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  // compute data extents
+  const xs = points.map(p => p.x), ys = points.map(p => p.y);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const xRange = xMax - xMin || 1, yRange = yMax - yMin || 1;
+
+  const PAD = 60;
+  const toCanvasX = v => PAD + ((v - xMin) / xRange) * (W - PAD * 2);
+  const toCanvasY = v => H - PAD - ((v - yMin) / yRange) * (H - PAD * 2);
+
+  // draw axes labels
+  ctx.font = '11px DM Mono, monospace';
+  ctx.fillStyle = '#4a5260';
+  ctx.textAlign = 'center';
+  ctx.fillText('t-SNE 维度 1', W / 2, H - 14);
+  ctx.save();
+  ctx.translate(16, H / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('t-SNE 维度 2', 0, 0);
+  ctx.restore();
+
+  // draw grid lines
+  ctx.strokeStyle = 'rgba(30,37,47,0.8)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const gx = PAD + (i / 4) * (W - PAD * 2);
+    const gy = PAD + (i / 4) * (H - PAD * 2);
+    ctx.beginPath(); ctx.moveTo(gx, PAD); ctx.lineTo(gx, H - PAD); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD, gy); ctx.lineTo(W - PAD, gy); ctx.stroke();
+  }
+
+  // draw points
+  const R = 7;
+  points.forEach(p => {
+    const cx = toCanvasX(p.x);
+    const cy = toCanvasY(p.y);
+    const col = CLUSTER_COLORS[p.cluster % CLUSTER_COLORS.length];
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.fillStyle = col + 'cc';
+    ctx.fill();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  });
+
+  // tooltip on hover
+  canvas.onmousemove = (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (W / rect.width);
+    const my = (e.clientY - rect.top)  * (H / rect.height);
+    let found = null;
+    for (const p of points) {
+      const dx = toCanvasX(p.x) - mx, dy = toCanvasY(p.y) - my;
+      if (Math.sqrt(dx*dx + dy*dy) < R + 4) { found = p; break; }
+    }
+    if (found) {
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX - area.getBoundingClientRect().left + 14) + 'px';
+      tooltip.style.top  = (e.clientY - area.getBoundingClientRect().top  - 10) + 'px';
+      tooltip.innerHTML  = `<b>${found.patientId}</b> &nbsp; 簇 ${found.cluster + 1}`;
+    } else {
+      tooltip.style.display = 'none';
+    }
+  };
+  canvas.onmouseleave = () => { tooltip.style.display = 'none'; };
+}
+
+</script>
+</body>
+</html>
