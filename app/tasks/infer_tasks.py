@@ -1,57 +1,67 @@
-from app.core.celery import celery
-from app.db.mysql import update_task, save_patient_feature
 import os
+import time  # 新增导入
 import uuid
 import numpy as np
 import SimpleITK as sitk
-
-# 导入你现有的推理类（路径不变）
+from app.core.celery import celery
 from Detection.CTArtifactInfer import CTArtifactInfer, ModelType
+from Conf.Config import DEVICE
 
-# 全局预加载模型（和你原代码一致）
-MODEL_WEIGHTS = {
-    ModelType.UNET2D:           "./Model/weights/nor_best.pth",
-    ModelType.ATTENTION_UNET2D: "./Model/weights/atten_best.pth",
-}
-infer_engines = {
-    ModelType.UNET2D: CTArtifactInfer(MODEL_WEIGHTS[ModelType.UNET2D], ModelType.UNET2D),
-    ModelType.ATTENTION_UNET2D: CTArtifactInfer(MODEL_WEIGHTS[ModelType.ATTENTION_UNET2D], ModelType.ATTENTION_UNET2D),
-}
+# 全局配置
+WEIGHT_PATH = "./Model/weights/nor_best.pth"
+# 临时文件/结果存放目录
+TMP_DIR = "./tmp"
+os.makedirs(TMP_DIR, exist_ok=True)
+
 
 @celery.task(bind=True)
-def async_infer_task(self, task_id, patient_id, model_type, nii_path, save_mask=True, save_feature=True):
+def async_infer_task(self, file_bytes: bytes, file_suffix: str):
     """
-    Celery 异步推理
+    异步推理主任务
+    :param file_bytes: 上传的nii文件二进制流
+    :param file_suffix: 文件后缀 .nii / .nii.gz
+    :return: 结果文件路径、特征向量
     """
     try:
-        self.update_state(state="PROGRESS", meta={"status": "开始推理"})
+        # ========== 模拟长耗时，测试用，正式上线删掉这行 ==========
+        print("🔹 模拟耗时推理，等待10秒...")
+        time.sleep(10)
+        # ========================================================
 
-        # 推理
-        engine = infer_engines[model_type]
-        uid = str(uuid.uuid4())
-        stem = os.path.basename(nii_path).replace(".nii.gz", "").replace(".nii", "")
-        mask_path = f"./results/{uid}_{stem}_mask.nii.gz"
-        feat_path = f"./saved_features/{uid}_{stem}_feature.npy"
+        # 1. 生成临时文件名，保存上传文件
+        task_id = self.request.id
+        tmp_nii_path = os.path.join(TMP_DIR, f"{task_id}{file_suffix}")
+        with open(tmp_nii_path, "wb") as f:
+            f.write(file_bytes)
 
-        sitk_mask, feature_vector = engine.predict_from_nii(
-            nii_path=nii_path,
-            save_mask_path=mask_path if save_mask else None,
-            save_feature_path=feat_path if save_feature else None
+        # 2. 初始化推理器（复用你原有推理类）
+        infer_engine = CTArtifactInfer(
+            model_weight_path=WEIGHT_PATH,
+            model_type=ModelType.UNET2D,
+            device=DEVICE
         )
 
-        # 保存患者特征到 MySQL
-        if patient_id and feature_vector is not None:
-            save_patient_feature(patient_id, feature_vector)
-
-        # 更新任务成功
-        update_task(
-            task_id=task_id,
-            status="success",
-            mask_path=mask_path if save_mask else None,
-            feature_path=feat_path if save_feature else None
+        # 3. 推理 + 保存掩码、特征
+        mask_save_path = os.path.join(TMP_DIR, f"{task_id}_mask{file_suffix}")
+        feat_save_path = os.path.join(TMP_DIR, f"{task_id}_feat.npy")
+        sitk_mask, feat_vec = infer_engine.predict_from_nii(
+            nii_path=tmp_nii_path,
+            save_mask_path=mask_save_path,
+            save_feature_path=feat_save_path
         )
-        return {"status": "success", "mask_path": mask_path, "feature_path": feat_path}
+
+        # 4. 组装返回数据
+        feat_list = feat_vec.tolist() if feat_vec is not None else None
+
+        return {
+            "status": "success",
+            "task_id": task_id,
+            "mask_file": mask_save_path,
+            "feature": feat_list
+        }
 
     except Exception as e:
-        update_task(task_id=task_id, status="failed", error=str(e))
-        return {"status": "failed", "error": str(e)}
+        return {
+            "status": "fail",
+            "msg": str(e)
+        }
