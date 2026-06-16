@@ -26,7 +26,7 @@ from app.db.mysql import (
     task_create, task_update,
     feature_upsert, feature_load_all,
     feature_list_patients, feature_delete,
-    report_upsert,
+    report_upsert, get_conn,
 )
 from Detection.CTArtifactInfer import CTArtifactInfer
 from Detection.model_enum import ModelType
@@ -306,6 +306,20 @@ async def cluster_analysis(
 
     return {"cluster_result": result}
 
+
+
+@app.get("/patients/check/{patient_id}", summary="检查患者是否存在", tags=["患者管理"])
+async def check_patient(patient_id: int):
+    conn = get_conn()
+    if not conn:
+        raise HTTPException(status_code=500, detail="数据库连接失败")
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT id, name, gender FROM pmi_patient WHERE id=%s", (patient_id,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"患者 ID {patient_id} 不存在于系统中")
+    return {"exists": True, "patient": row}
 
 # ══════════════════════════════════════════════════════════════
 #  服务入口

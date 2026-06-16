@@ -42,17 +42,17 @@ class CTArtifactInfer:
     def _load_model(self):
         if self.model_type == ModelType.UNET2D:
             model = UNet2D().to(self.device)
-            print(f"📌 加载 UNet2D 权重: {self.model_weight_path}")
+            weight_path = "./Model/weights/nor_best.pth"
+            print(f"📌 加载 UNet2D 权重: {weight_path}")
         elif self.model_type == ModelType.ATTENTION_UNET2D:
             model = AttentionUNet2D().to(self.device)
-            print(f"📌 加载 AttentionUNet2D 权重: {self.model_weight_path}")
+            weight_path = "./Model/weights/atten_best.pth"
+            print(f"📌 加载 AttentionUNet2D 权重: {weight_path}")
         else:
-            raise ValueError(
-                f"不支持的模型类型：{self.model_type}，"
-                f"可选：{ModelType.UNET2D} / {ModelType.ATTENTION_UNET2D}"
-            )
+            raise ValueError(f"不支持的模型类型：{self.model_type}")
+
         model.load_state_dict(
-            torch.load(self.model_weight_path, map_location=self.device)
+            torch.load(weight_path, map_location=self.device)
         )
         model.eval()
         return model

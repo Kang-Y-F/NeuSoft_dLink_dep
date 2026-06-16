@@ -1747,6 +1747,24 @@ new ResizeObserver(()=>{if(vtkReady)vtkRenWin.render();}).observe($('panel-3d'))
 // ══════════════════════════════════════════════════════════
 $('infer-btn').addEventListener('click',async()=>{
   if(!selFile)return;
+      // 新增：推理前验证患者
+    const pid = $('patient-id').value.trim();
+    if (pid) {
+        try {
+            const checkRes = await fetch(`${API}/patients/check/${pid}`);
+            if (!checkRes.ok) {
+                const err = await checkRes.json();
+                showErr(err.detail || '患者不存在，请确认患者编号');
+                log(`患者 ${pid} 不存在于系统中`, 'err');
+                return;  // 阻止推理
+            }
+            const checkData = await checkRes.json();
+            log(`患者验证通过：${checkData.patient.name || pid}`, 'ok');
+        } catch (e) {
+            showErr('患者验证失败，请检查网络');
+            return;
+        }
+    }
   clearAlerts();$('infer-btn').disabled=true;$('dl-btn').disabled=true;dlBlob=null;
   $('prog-wrap').classList.add('show');$('prog-fill').classList.add('ind');
   $('prog-txt').textContent='正在上传并推理...';
@@ -1756,7 +1774,7 @@ $('infer-btn').addEventListener('click',async()=>{
   const mt=document.querySelector('input[name="model-type"]:checked').value;
   const doFeat=$('save-feature').checked;
   const autoReg=$('auto-register').checked;
-  const pid=$('patient-id').value.trim();
+  // const pid=$('patient-id').value.trim();
   const ff=pid?`${pid}_feature.npy`:'ct_feature.npy';
   log(`推理：${selFile.name}（${mt}）`,'inf');
   const form=new FormData();form.append('file',selFile);
