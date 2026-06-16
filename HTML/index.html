@@ -993,7 +993,7 @@ input[type=range].srng::-webkit-slider-thumb{-webkit-appearance:none;width:11px;
     </div>
     <div class="opt-block">
       <div class="s-label">患者特征管理</div>
-      <div class="opt-row"><label>患者编号</label><input type="text" id="patient-id" placeholder="如 P001"/></div>
+      <div class="opt-row"><label>患者编号</label><input type="text" id="patient-id" placeholder="如 1,2,3"/></div>
       <div class="toggle-row"><span>推理后保存特征</span><label class="tog"><input type="checkbox" id="save-feature" checked/><span class="tog-sl"></span></label></div>
       <div class="toggle-row" style="margin-top:0"><span>自动录入聚类库</span><label class="tog"><input type="checkbox" id="auto-register" checked/><span class="tog-sl"></span></label></div>
     </div>
@@ -1761,7 +1761,7 @@ $('infer-btn').addEventListener('click',async()=>{
   log(`推理：${selFile.name}（${mt}）`,'inf');
   const form=new FormData();form.append('file',selFile);
   try{
-    const url=`${API}/infer/nii?save_mask=${doSave}&mask_filename=${encodeURIComponent(fname)}&model_type=${encodeURIComponent(mt)}&save_feature=${doFeat}&feature_filename=${encodeURIComponent(ff)}`;
+    const url=`${API}/infer/nii?save_mask=${doSave}&mask_filename=${encodeURIComponent(fname)}&model_type=${encodeURIComponent(mt)}&save_feature=${doFeat}&patient_id=${encodeURIComponent(pid)}&feature_filename=${encodeURIComponent(ff)}`;
     const res=await fetch(url,{method:'POST',body:form});
     $('prog-fill').classList.remove('ind');$('prog-fill').style.width='100%';$('prog-txt').textContent='推理完成';
     if(!res.ok){const e=await res.json().catch(()=>({detail:''}));throw new Error(e.detail||`HTTP ${res.status}`);}

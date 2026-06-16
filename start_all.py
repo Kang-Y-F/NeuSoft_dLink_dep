@@ -18,17 +18,20 @@ time.sleep(2)
 # 2. 启动 Celery Worker（直接用环境里的 celery.exe，不用 conda run）
 print("启动 Celery Worker...")
 subprocess.Popen(
-    [os.path.join(CONDA_ENV_PATH, "Scripts", "celery.exe"),
+    ["cmd", "/k",
+     os.path.join(CONDA_ENV_PATH, "Scripts", "celery.exe"),
      "-A", "app.core.celery", "worker", "--pool=solo", "--loglevel=info"],
-    creationflags=subprocess.CREATE_NEW_CONSOLE
+    creationflags=subprocess.CREATE_NEW_CONSOLE,
+    cwd=PROJECT_ROOT
 )
-time.sleep(3)
 
 # 3. 启动 FastAPI（直接用环境里的 python.exe）
 print("启动 FastAPI 服务...")
 subprocess.Popen(
-    [os.path.join(CONDA_ENV_PATH, "python.exe"), "CTDetectionServer.py"],
-    creationflags=subprocess.CREATE_NEW_CONSOLE
+    ["cmd", "/k",
+     os.path.join(CONDA_ENV_PATH, "python.exe"), "CTDetectionServer.py"],
+    creationflags=subprocess.CREATE_NEW_CONSOLE,
+    cwd=PROJECT_ROOT
 )
 
 print("✅ 所有服务已启动！")

@@ -1,118 +1,127 @@
+# app/api/endpoints.py
+# ============================================================
+# 异步推理接口路由（挂载于 /api 前缀）
+# 同步推理接口统一在 CTDetectionServer.py 中定义
+# ============================================================
+
 import os
 from fastapi import APIRouter, UploadFile, File, Query, HTTPException
 from fastapi.responses import FileResponse
-import uuid
 
-from Detection.CTArtifactInfer import CTArtifactInfer, ModelType
 from app.tasks.infer_tasks import async_infer_task
-from Conf.Config import DEVICE
+from app.db.mysql import task_get
+from Detection.model_enum import ModelType
 
 router = APIRouter()
-WEIGHT_PATH = "./Model/weights/nor_best.pth"
 TMP_DIR = "./tmp"
-os.makedirs(TMP_DIR, exist_ok=True)
 
-# ===================== 原有【同步接口】保留不动 =====================
-@router.post("/infer/nii")
-async def infer_nii(
+
+# ── 提交异步推理任务 ──────────────────────────────────────────
+
+@router.post(
+    "/async/infer/submit",
+    summary="提交异步推理任务",
+    description="上传 .nii/.nii.gz 文件，携带患者编号，返回 task_id 供后续轮询。"
+)
+async def submit_async_task(
     file: UploadFile = File(...),
-    save_mask: bool = Query(True),
-    mask_filename: str = Query("artifact_mask.nii.gz"),
-    model_type: str = Query(ModelType.UNET2D),
-    save_feature: bool = Query(True),
-    feature_filename: str = Query("feature.npy")
+    patient_id: str  = Query(..., description="患者编号，如 P001"),
+    model_type: str  = Query(ModelType.UNET2D, description="模型类型"),
 ):
-    import uuid
-    import numpy as np
-    import SimpleITK as sitk
-
-    temp_name = f"{uuid.uuid4()}_{file.filename}"
-    temp_nii_path = os.path.join(TMP_DIR, temp_name)
-
-    # 保存上传文件
-    with open(temp_nii_path, "wb") as f:
-        f.write(await file.read())
-
-    # 初始化推理器
-    infer_engine = CTArtifactInfer(
-        model_weight_path=WEIGHT_PATH,
-        model_type=model_type
-    )
-
-    mask_save_path = os.path.join(TMP_DIR, mask_filename) if save_mask else None
-    feat_save_path = os.path.join(TMP_DIR, feature_filename) if save_feature else None
-
-    sitk_mask, feature_vector = infer_engine.predict_from_nii(
-        nii_path=temp_nii_path,
-        save_mask_path=mask_save_path,
-        save_feature_path=feat_save_path
-    )
-
-    # 删除临时上传文件
-    if os.path.exists(temp_nii_path):
-        os.remove(temp_nii_path)
-
-    if save_mask and mask_save_path and os.path.exists(mask_save_path):
-        return FileResponse(
-            path=mask_save_path,
-            filename=mask_filename,
-            media_type="application/octet-stream"
-        )
-    else:
-        pixel_count = int(np.sum(sitk.GetArrayFromImage(sitk_mask) > 0))
-        return {
-            "code": 200,
-            "msg": "推理完成",
-            "artifact_pixel_count": pixel_count,
-            "feature_shape": list(feature_vector.shape) if feature_vector is not None else None
-        }
-
-# ===================== 新增【异步接口】=====================
-@router.post("/async/infer/submit")
-async def submit_async_task(file: UploadFile = File(...)):
-    """提交异步推理任务，返回 task_id"""
-    # 获取文件二进制 + 后缀
-    file_bytes = await file.read()
-    suffix = os.path.splitext(file.filename)[1]
-    if suffix not in (".nii", ".gz"):
+    suffix = os.path.splitext(file.filename)[-1].lower()
+    # .nii.gz 的 splitext 只取到 .gz，需特殊处理
+    if file.filename.endswith(".nii.gz"):
+        suffix = ".gz"
+    elif suffix not in (".nii",):
         raise HTTPException(status_code=400, detail="仅支持 .nii / .nii.gz 文件")
 
-    # 派发Celery任务
-    task = async_infer_task.delay(file_bytes, suffix)
+    file_bytes = await file.read()
+
+    task = async_infer_task.delay(
+        file_bytes  = file_bytes,
+        file_suffix = suffix,
+        patient_id  = patient_id,
+        model_type  = model_type,
+    )
     return {
-        "code": 200,
-        "msg": "任务已提交",
-        "task_id": task.id
+        "code":       200,
+        "msg":        "任务已提交",
+        "task_id":    task.id,
+        "patient_id": patient_id,
     }
 
 
-@router.get("/async/infer/status")
-async def get_task_status(task_id: str = Query(..., description="任务ID")):
-    """查询异步任务状态"""
+# ── 查询任务状态 ──────────────────────────────────────────────
+
+@router.get(
+    "/async/infer/status",
+    summary="查询异步任务状态",
+    description="优先读 MySQL 持久状态，Redis 作为降级兜底。"
+)
+async def get_task_status(
+    task_id: str = Query(..., description="submit 接口返回的 task_id")
+):
+    # 优先读 MySQL（持久，重启后仍可查）
+    row = task_get(task_id)
+    if row:
+        return {
+            "source":       "mysql",
+            "state":        row["status"].upper(),
+            "task_id":      task_id,
+            "patient_id":   row.get("patient_id"),
+            "mask_path":    row.get("mask_path"),
+            "feature_path": row.get("feature_path"),
+            "created_at":   str(row.get("created_at", "")),
+            "finished_at":  str(row.get("finished_at", "")),
+            "error":        row.get("error"),
+        }
+
+    # 降级：读 Redis result backend
     task_result = async_infer_task.AsyncResult(task_id)
-    if task_result.state == "PENDING":
-        return {"state": "PENDING", "msg": "任务等待执行"}
-    elif task_result.state == "PROGRESS":
-        return {"state": "PROGRESS", "msg": "任务执行中"}
-    elif task_result.state == "SUCCESS":
-        return {"state": "SUCCESS", "data": task_result.result}
+    state_map = {
+        "PENDING":  "PENDING",
+        "STARTED":  "RUNNING",
+        "PROGRESS": "RUNNING",
+        "SUCCESS":  "SUCCESS",
+        "FAILURE":  "FAILURE",
+    }
+    state = state_map.get(task_result.state, task_result.state)
+    resp  = {"source": "redis", "state": state, "task_id": task_id}
+
+    if task_result.state == "SUCCESS":
+        resp["data"] = task_result.result
     elif task_result.state == "FAILURE":
-        return {"state": "FAILURE", "msg": f"任务失败: {task_result.info}"}
-    else:
-        return {"state": task_result.state, "msg": "未知状态"}
+        resp["msg"] = str(task_result.info)
+
+    return resp
 
 
-@router.get("/async/infer/download")
-async def download_mask(task_id: str = Query(...)):
-    """下载异步推理生成的掩码文件"""
-    mask_path = os.path.join(TMP_DIR, f"{task_id}_mask.nii.gz")
-    if not os.path.exists(mask_path):
-        mask_path = os.path.join(TMP_DIR, f"{task_id}_mask.nii")
-    if not os.path.exists(mask_path):
-        raise HTTPException(status_code=404, detail="文件不存在或任务未完成")
+# ── 下载异步推理生成的掩码文件 ────────────────────────────────
+
+@router.get(
+    "/async/infer/download",
+    summary="下载异步推理掩码文件",
+)
+async def download_mask(
+    task_id: str = Query(..., description="任务 ID")
+):
+    # 优先从 MySQL 拿路径
+    row = task_get(task_id)
+    mask_path = row.get("mask_path") if row else None
+
+    # 兜底：按约定命名查找
+    if not mask_path or not os.path.exists(mask_path):
+        for ext in (".nii.gz", ".nii"):
+            candidate = os.path.join(TMP_DIR, f"{task_id}_mask{ext}")
+            if os.path.exists(candidate):
+                mask_path = candidate
+                break
+
+    if not mask_path or not os.path.exists(mask_path):
+        raise HTTPException(status_code=404, detail="掩码文件不存在或任务未完成")
 
     return FileResponse(
         path=mask_path,
         filename=os.path.basename(mask_path),
-        media_type="application/octet-stream"
+        media_type="application/octet-stream",
     )
