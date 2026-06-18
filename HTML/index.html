@@ -993,7 +993,22 @@ input[type=range].srng::-webkit-slider-thumb{-webkit-appearance:none;width:11px;
     </div>
     <div class="opt-block">
       <div class="s-label">患者特征管理</div>
-      <div class="opt-row"><label>患者编号</label><input type="text" id="patient-id" placeholder="如 1,2,3"/></div>
+<!--      <div class="opt-row"><label>患者编号</label><input type="text" id="patient-id" placeholder="如 1,2,3"/></div>-->
+<div class="opt-row">
+  <label>患者编号</label>
+  <div style="display:flex;gap:6px">
+    <input type="text" id="patient-id" placeholder="如 1,2,3" style="flex:1"/>
+    <button onclick="queryOrders()" style="padding:6px 10px;background:rgba(0,229,195,.1);border:1px solid rgba(0,229,195,.3);border-radius:6px;color:#00e5c3;font-size:11px;cursor:pointer;white-space:nowrap">查检查单</button>
+  </div>
+</div>
+
+<!-- 检查单选择区（默认隐藏） -->
+<div id="order-panel" style="display:none;margin-top:4px;background:#161b22;border:1px solid #1e252f;border-radius:8px;padding:10px;font-size:11px">
+  <div style="color:#8a95a0;margin-bottom:6px;font-size:10px;letter-spacing:1px;text-transform:uppercase">待执行检查单</div>
+  <div id="order-list"></div>
+  <div id="order-empty" style="color:#4a5260;text-align:center;padding:8px 0;display:none">暂无待执行CT检查单</div>
+  <div id="order-selected" style="display:none;margin-top:8px;padding:6px 10px;background:rgba(0,229,195,.07);border:1px solid rgba(0,229,195,.2);border-radius:6px;color:#00e5c3;font-size:11px"></div>
+</div>
       <div class="toggle-row"><span>推理后保存特征</span><label class="tog"><input type="checkbox" id="save-feature" checked/><span class="tog-sl"></span></label></div>
       <div class="toggle-row" style="margin-top:0"><span>自动录入聚类库</span><label class="tog"><input type="checkbox" id="auto-register" checked/><span class="tog-sl"></span></label></div>
     </div>
@@ -1745,72 +1760,248 @@ new ResizeObserver(()=>{if(vtkReady)vtkRenWin.render();}).observe($('panel-3d'))
 // ══════════════════════════════════════════════════════════
 //  Infer
 // ══════════════════════════════════════════════════════════
-$('infer-btn').addEventListener('click',async()=>{
-  if(!selFile)return;
-      // 新增：推理前验证患者
-    const pid = $('patient-id').value.trim();
-    if (pid) {
-        try {
-            const checkRes = await fetch(`${API}/patients/check/${pid}`);
-            if (!checkRes.ok) {
-                const err = await checkRes.json();
-                showErr(err.detail || '患者不存在，请确认患者编号');
-                log(`患者 ${pid} 不存在于系统中`, 'err');
-                return;  // 阻止推理
-            }
-            const checkData = await checkRes.json();
-            log(`患者验证通过：${checkData.patient.name || pid}`, 'ok');
-        } catch (e) {
-            showErr('患者验证失败，请检查网络');
-            return;
-        }
+// ── 检查单相关状态 ──────────────────────────────────────────
+let selectedOrderId = null;       // 用户选中的 check_order.id
+let selectedOrderInfo = null;     // 检查单完整信息（用于日志展示）
+
+// ── 查询检查单 ──────────────────────────────────────────────
+async function queryOrders() {
+  const pid = $('patient-id').value.trim();
+  if (!pid) { showErr('请先输入患者编号'); return; }
+
+  // 先验证患者是否存在
+  try {
+    const checkRes = await fetch(`${API}/patients/check/${pid}`);
+    if (!checkRes.ok) {
+      const err = await checkRes.json();
+      showErr(err.detail || '患者不存在');
+      return;
     }
-  clearAlerts();$('infer-btn').disabled=true;$('dl-btn').disabled=true;dlBlob=null;
-  $('prog-wrap').classList.add('show');$('prog-fill').classList.add('ind');
-  $('prog-txt').textContent='正在上传并推理...';
-  await new Promise(r=>setTimeout(r,50));
-  const fname=$('mask-filename').value.trim()||'artifact_mask.nii.gz';
-  const doSave=$('save-mask').checked;
-  const mt=document.querySelector('input[name="model-type"]:checked').value;
-  const doFeat=$('save-feature').checked;
-  const autoReg=$('auto-register').checked;
-  // const pid=$('patient-id').value.trim();
-  const ff=pid?`${pid}_feature.npy`:'ct_feature.npy';
-  log(`推理：${selFile.name}（${mt}）`,'inf');
-  const form=new FormData();form.append('file',selFile);
-  try{
-    const url=`${API}/infer/nii?save_mask=${doSave}&mask_filename=${encodeURIComponent(fname)}&model_type=${encodeURIComponent(mt)}&save_feature=${doFeat}&patient_id=${encodeURIComponent(pid)}&feature_filename=${encodeURIComponent(ff)}`;
-    const res=await fetch(url,{method:'POST',body:form});
-    $('prog-fill').classList.remove('ind');$('prog-fill').style.width='100%';$('prog-txt').textContent='推理完成';
-    if(!res.ok){const e=await res.json().catch(()=>({detail:''}));throw new Error(e.detail||`HTTP ${res.status}`);}
-    if(doSave){
-      const blob=await res.blob();dlBlob=blob;$('dl-btn').disabled=false;
-      log(`掩码：${fname}`,'ok');
-      const fs=res.headers.get('Feature-Shape');
-      if(doFeat&&fs&&fs!=='None'&&pid&&autoReg){
-        try{
-          const f2=new FormData();f2.append('file',selFile);
-          const fr=await fetch(`${API}/extract/feature?model_type=${encodeURIComponent(mt)}&feature_filename=${encodeURIComponent(ff)}&return_average=true`,{method:'POST',body:f2});
-          if(fr.ok){const fb=await fr.blob();await savePF(pid,fb,ff);await loadPats();log(`患者 ${pid} 已录入`,'ok');}
-        }catch(fe){log(`录入失败：${fe.message}`,'err');}
+    const checkData = await checkRes.json();
+    log(`患者验证通过：${checkData.patient.name}`, 'ok');
+  } catch {
+    showErr('患者验证失败，请检查网络');
+    return;
+  }
+
+  // 查询待执行检查单
+  try {
+    const res  = await fetch(`${API}/orders/pending/${pid}`);
+    const data = await res.json();
+    const list = data.orders || [];
+
+    $('order-panel').style.display = 'block';
+    $('order-list').innerHTML = '';
+    $('order-selected').style.display = 'none';
+    selectedOrderId   = null;
+    selectedOrderInfo = null;
+
+    if (list.length === 0) {
+      $('order-empty').style.display = 'block';
+      log(`患者 ${pid} 暂无待执行CT检查单`, 'inf');
+    } else {
+      $('order-empty').style.display = 'none';
+      list.forEach(o => {
+        const btn = document.createElement('div');
+        btn.style.cssText = 'padding:8px 12px;margin-bottom:5px;background:#0f1217;border:1px solid #1e252f;border-radius:7px;cursor:pointer;transition:all .15s;display:flex;justify-content:space-between;align-items:center;gap:10px';
+        btn.innerHTML = `
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <span style="color:#dde3ea;font-weight:600;font-size:12px">${o.item_name || 'CT检查'}</span>
+            <span style="color:#4a5260;font-size:10px">开单医生：${o.doctor_name || '—'} &nbsp;·&nbsp; ${o.create_time || ''}</span>
+          </div>
+          <span style="color:#00e5c3;font-size:10px;flex-shrink:0">选择</span>
+        `;
+        btn.addEventListener('mouseenter', () => btn.style.borderColor = 'rgba(0,229,195,.4)');
+        btn.addEventListener('mouseleave', () => {
+          btn.style.borderColor = selectedOrderId === o.order_id ? 'rgba(0,229,195,.4)' : '#1e252f';
+        });
+        btn.addEventListener('click', () => {
+          // 取消其他选中
+          $('order-list').querySelectorAll('div').forEach(b => b.style.borderColor = '#1e252f');
+          btn.style.borderColor = 'rgba(0,229,195,.4)';
+          selectedOrderId   = o.order_id;
+          selectedOrderInfo = o;
+          $('order-selected').style.display = 'block';
+          $('order-selected').textContent   = `已选择检查单 #${o.order_id}：${o.item_name}`;
+          log(`已选择检查单 #${o.order_id}：${o.item_name}`, 'ok');
+        });
+        $('order-list').appendChild(btn);
+      });
+      log(`找到 ${list.length} 条待执行CT检查单`, 'ok');
+    }
+  } catch (e) {
+    log(`查询检查单失败：${e.message}`, 'err');
+  }
+}
+
+// ── 推理按钮 ──────────────────────────────────────────────────
+$('infer-btn').addEventListener('click', async () => {
+  if (!selFile) return;
+
+  const pid = $('patient-id').value.trim();
+
+  // 验证患者
+  if (pid) {
+    try {
+      const checkRes = await fetch(`${API}/patients/check/${pid}`);
+      if (!checkRes.ok) {
+        const err = await checkRes.json();
+        showErr(err.detail || '患者不存在，请确认患者编号');
+        log(`患者 ${pid} 不存在于系统中`, 'err');
+        $('infer-btn').disabled = false;
+        return;
       }
-      showOk('推理成功！');
-      await parseMask(blob,fname);
-      document.querySelectorAll('.vtab').forEach(t=>t.classList.remove('active'));
-      document.querySelector('[data-mode="quad"]').classList.add('active');
-      viewMode='quad';applyViewMode();
-    }else{
-      const data=await res.json();log(`伪影像素：${data.artifact_pixel_count?.toLocaleString()}`,'ok');showOk('推理完成');
+      const checkData = await checkRes.json();
+      log(`患者验证通过：${checkData.patient.name || pid}`, 'ok');
+    } catch {
+      showErr('患者验证失败，请检查网络');
+      $('infer-btn').disabled = false;
+      return;
     }
-  }catch(e){$('prog-fill').style.width='0%';log(`失败：${e.message}`,'err');showErr(e.message);}
-  finally{$('infer-btn').disabled=false;setTimeout(()=>{$('prog-wrap').classList.remove('show');$('prog-fill').style.width='0%';},2500);}
+  }
+
+  // 如果患者有检查单但没选，提示确认
+  if (pid && !selectedOrderId && $('order-panel').style.display !== 'none' && $('order-empty').style.display === 'none') {
+    if (!confirm('您还未选择检查单，推理结果将不关联到HIS检查单。\n是否继续？')) {
+      return;
+    }
+  }
+
+  if (!selectedOrderId) {
+    // 查询一下有没有待执行检查单
+    if (pid) {
+      // 有患者ID但没选检查单
+      const hasOrders = $('order-list').children.length > 0
+      if (!hasOrders && $('order-panel').style.display === 'none') {
+        // 还没查过检查单，提示先查
+        showErr('请先输入患者编号并点击「查检查单」，选择对应检查单后再推理')
+        $('infer-btn').disabled = false
+        return
+      } else if (hasOrders || ($('order-panel').style.display !== 'none' && $('order-empty').style.display === 'none')) {
+        // 查了但没选
+        showErr('请从检查单列表中选择一条待执行检查单')
+        $('infer-btn').disabled = false
+        return
+      } else {
+        // 暂无检查单，询问是否继续
+        if (!confirm('该患者暂无待执行CT检查单，推理结果将不关联到任何检查单。\n\n是否继续推理？')) {
+          $('infer-btn').disabled = false
+          return
+        }
+      }
+    } else {
+      // 没有患者ID，直接推理（纯本地测试）
+    }
+  }
+
+  clearAlerts();
+  $('infer-btn').disabled = true;
+  $('dl-btn').disabled    = true;
+  dlBlob = null;
+
+  $('prog-wrap').classList.add('show');
+  $('prog-fill').classList.add('ind');
+  $('prog-txt').textContent = '正在上传并推理...';
+  await new Promise(r => setTimeout(r, 50));
+
+  const fname   = $('mask-filename').value.trim() || 'artifact_mask.nii.gz';
+  const doSave  = $('save-mask').checked;
+  const mt      = document.querySelector('input[name="model-type"]:checked').value;
+  const doFeat  = $('save-feature').checked;
+  const autoReg = $('auto-register').checked;
+  const ff      = pid ? `${pid}_feature.npy` : 'ct_feature.npy';
+
+  log(`推理：${selFile.name}（${mt}）`, 'inf');
+  if (selectedOrderId) log(`关联检查单 #${selectedOrderId}`, 'inf');
+
+  const form = new FormData();
+  form.append('file', selFile);
+
+  // 构造 URL：带上 order_id 和 his_patient_id
+  let url = `${API}/infer/nii?save_mask=${doSave}&mask_filename=${encodeURIComponent(fname)}&model_type=${encodeURIComponent(mt)}&save_feature=${doFeat}&patient_id=${encodeURIComponent(pid)}&feature_filename=${encodeURIComponent(ff)}`;
+  if (selectedOrderId) url += `&order_id=${selectedOrderId}`;
+  if (pid)             url += `&his_patient_id=${encodeURIComponent(pid)}`;
+
+  try {
+    const res = await fetch(url, { method: 'POST', body: form });
+    $('prog-fill').classList.remove('ind');
+    $('prog-fill').style.width = '100%';
+    $('prog-txt').textContent  = '推理完成';
+
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({ detail: '' }));
+      throw new Error(e.detail || `HTTP ${res.status}`);
+    }
+
+    if (doSave) {
+      const blob = await res.blob();
+      dlBlob = blob;
+      $('dl-btn').disabled = false;
+      log(`掩码：${fname}`, 'ok');
+
+      // 推理完成后如果关联了检查单，提示
+      if (selectedOrderId) {
+        log(`检查单 #${selectedOrderId} 已标记为完成`, 'ok');
+        // 重置选择状态
+        selectedOrderId   = null;
+        selectedOrderInfo = null;
+        $('order-selected').style.display = 'none';
+        $('order-panel').style.display    = 'none';
+      }
+
+      const fs = res.headers.get('Feature-Shape');
+      if (doFeat && fs && fs !== 'None' && pid && autoReg) {
+        try {
+          const f2 = new FormData();
+          f2.append('file', selFile);
+          const fr = await fetch(`${API}/extract/feature?model_type=${encodeURIComponent(mt)}&feature_filename=${encodeURIComponent(ff)}&return_average=true`, { method: 'POST', body: f2 });
+          if (fr.ok) {
+            const fb = await fr.blob();
+            await savePF(pid, fb, ff);
+            await loadPats();
+            log(`患者 ${pid} 已录入`, 'ok');
+          }
+        } catch (fe) {
+          log(`录入失败：${fe.message}`, 'err');
+        }
+      }
+
+      showOk('推理成功！结果已写入影像报告');
+      await parseMask(blob, fname);
+      document.querySelectorAll('.vtab').forEach(t => t.classList.remove('active'));
+      document.querySelector('[data-mode="quad"]').classList.add('active');
+      viewMode = 'quad';
+      applyViewMode();
+
+    } else {
+      const data = await res.json();
+      log(`伪影像素：${data.artifact_pixel_count?.toLocaleString()}`, 'ok');
+      showOk('推理完成');
+    }
+
+  } catch (e) {
+    $('prog-fill').style.width = '0%';
+    log(`失败：${e.message}`, 'err');
+    showErr(e.message);
+  } finally {
+    $('infer-btn').disabled = false;
+    setTimeout(() => {
+      $('prog-wrap').classList.remove('show');
+      $('prog-fill').style.width = '0%';
+    }, 2500);
+  }
 });
-$('dl-btn').addEventListener('click',()=>{
-  if(!dlBlob)return;
-  const a=document.createElement('a');a.href=URL.createObjectURL(dlBlob);
-  a.download=$('mask-filename').value.trim()||'artifact_mask.nii.gz';a.click();URL.revokeObjectURL(a.href);
-  log('已下载','ok');
+
+$('dl-btn').addEventListener('click', () => {
+  if (!dlBlob) return;
+  const a      = document.createElement('a');
+  a.href       = URL.createObjectURL(dlBlob);
+  a.download   = $('mask-filename').value.trim() || 'artifact_mask.nii.gz';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  log('已下载', 'ok');
 });
+
 
 // ══════════════════════════════════════════════════════════
 //  Patients / Cluster
@@ -1831,12 +2022,41 @@ function renderPats(){
     list.appendChild(div);
   });
   list.querySelectorAll('.patient-item-del').forEach(btn=>{
-    btn.addEventListener('click',async()=>{
-      const pid=btn.dataset.pid;
-      try{const r=await fetch(`${API}/patients/${encodeURIComponent(pid)}`,{method:'DELETE'});
-        if(!r.ok)throw new Error((await r.json()).detail||'删除失败');
-        delete patReg[pid];renderPats();log(`患者 ${pid} 已删除`,'ok');
-      }catch(e){log(`删除失败：${e.message}`,'err');}
+        btn.addEventListener('click', async () => {
+      const pid = btn.dataset.pid;
+
+      // 确认弹窗
+      const confirmed = confirm(
+        `确认删除患者 ${pid} 的所有CT特征数据？\n\n` +
+        `此操作将同时删除：\n` +
+        `· CT特征向量（聚类分析用）\n` +
+        `· 数据库中的CT影像报告记录\n\n` +
+        `删除后无法恢复，是否继续？`
+      );
+      if (!confirmed) return;
+
+      try {
+        // 1. 删除CT特征（原有逻辑）
+        const r = await fetch(`${API}/patients/${encodeURIComponent(pid)}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error((await r.json()).detail || '删除失败');
+
+        // 2. 同时删除 check_report 里的CT影像报告（调 Spring Boot 接口）
+        // his_patient_id 是数字ID，pid 是字符串患者编号，两者一致时才删
+        if (/^\d+$/.test(pid)) {
+          try {
+             await fetch(`http://localhost:8999/report/ct/patient/${pid}`, { method: 'DELETE' });
+          } catch (e2) {
+            log(`CT报告删除失败（非致命）：${e2.message}`, 'err');
+          }
+        }
+
+        delete patReg[pid];
+        renderPats();
+        log(`患者 ${pid} 数据已全部删除`, 'ok');
+
+      } catch (e) {
+        log(`删除失败：${e.message}`, 'err');
+      }
     });
   });
 }
@@ -1898,10 +2118,60 @@ function renderScatter(pts,k){
 // ══════════════════════════════════════════════════════════
 //  Boot
 // ══════════════════════════════════════════════════════════
-window.addEventListener('DOMContentLoaded',()=>{
+window.addEventListener('DOMContentLoaded', () => {
   vtkInit();
   loadPats();
+
+  // ── 监听来自父页面（ImagingView.vue）的 postMessage ──────────
+  // 当医生端嵌入此页面时，自动加载对应患者的掩码文件
+  window.addEventListener('message', async (e) => {
+    // 安全校验：只接受来自 localhost 的消息
+    if (!e.origin.includes('localhost')) return;
+
+    // 自动填入患者编号
+    if (e.data?.type === 'SET_PATIENT_ID' && e.data.patientId) {
+      const input = $('patient-id');
+      if (input && !input.value) {
+        input.value = String(e.data.patientId);
+        log(`已自动填入患者编号：${e.data.patientId}`, 'inf');
+      }
+    }
+
+    // 自动加载掩码文件（核心：医生端传来掩码URL，自动渲染）
+    if (e.data?.type === 'LOAD_MASK_URL' && e.data.maskUrl) {
+      log(`自动加载掩码文件...`, 'inf');
+      try {
+        const res  = await fetch(e.data.maskUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        // 取文件名
+        const fname = e.data.maskUrl.split('/').pop() || 'mask.nii.gz';
+        await parseMask(blob, fname);
+        log(`掩码自动加载完成`, 'ok');
+        showOk('已自动加载该患者掩码文件');
+      } catch (err) {
+        log(`掩码自动加载失败：${err.message}`, 'err');
+      }
+    }
+
+    // 自动加载原始CT文件（如果有的话）
+    if (e.data?.type === 'LOAD_CT_URL' && e.data.ctUrl) {
+      log(`自动加载CT文件...`, 'inf');
+      try {
+        const res  = await fetch(e.data.ctUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const buf  = await res.arrayBuffer();
+        const fname = e.data.ctUrl.split('/').pop() || 'ct.nii.gz';
+        const file = new File([buf], fname);
+        onFile(file);
+        log(`CT文件自动加载完成`, 'ok');
+      } catch (err) {
+        log(`CT文件自动加载失败：${err.message}`, 'err');
+      }
+    }
+  });
 });
+
 </script>
 </body>
 </html>
