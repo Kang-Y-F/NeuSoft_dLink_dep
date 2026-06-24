@@ -208,17 +208,13 @@ def report_upsert(
     mask_path: str,
     artifact_pixel_count: int,
     feature_shape: str,
-    ct_path: str = "",               # ← 新增：原始CT文件URL
+    ct_path: str = "",
     report_text: str = "CT伪影分割完成"
 ) -> bool:
-    """
-    将推理结果写入 HIS check_report 表。
-    image_url  存掩码文件HTTP URL
-    ct_url     存原始CT文件HTTP URL（用于医生端渲染四视图）
-    """
     conn = get_conn()
     if not conn:
         return False
+    cur = None
     try:
         import json
         artifact_result = json.dumps({
@@ -226,23 +222,39 @@ def report_upsert(
             "feature_shape": feature_shape
         }, ensure_ascii=False)
 
+        # 通过 check_order.id 查出 medical_order.id
+        medical_order_id = order_id
+        if order_id:
+            cur = conn.cursor()
+            cur.execute("SELECT order_id FROM check_order WHERE id=%s", (order_id,))
+            row = cur.fetchone()
+            print(f"[DEBUG report_upsert] check_order.id={order_id} -> medical_order.id={row[0] if row else 'None'}")
+            if row and row[0]:
+                medical_order_id = row[0]
+            cur.close()
+            cur = None
+
         cur = conn.cursor()
         cur.execute(
             '''INSERT INTO check_report
                (order_id, patient_id, img_type, image_url, ct_url,
                 artifact_result, report_text)
                VALUES (%s, %s, %s, %s, %s, %s, %s)''',
-            (order_id, patient_id, "CT", mask_path, ct_path,
+            (medical_order_id, patient_id, "CT", mask_path, ct_path,
              artifact_result, report_text)
         )
         conn.commit()
+        print(f"[DEBUG report_upsert] 写入成功 patient_id={patient_id} order_id={medical_order_id}")
         return True
-    except Error as e:
+    except Exception as e:
         print(f"[MySQL] report_upsert 失败：{e}")
+        import traceback
+        traceback.print_exc()
         return False
     finally:
-        cur.close(); conn.close()
-
+        if cur:
+            cur.close()
+        conn.close()
 
 # ══════════════════════════════════════════════════════════════
 #  查询患者待执行CT检查单
@@ -267,7 +279,7 @@ def get_pending_ct_orders(patient_id: int) -> list:
                LEFT JOIN doctor      d  ON co.doctor_id = d.id
                WHERE co.user_id    = %s
                  AND co.order_type = 1
-                 AND co.status     = 0
+                 AND co.status     = 1
                ORDER BY co.create_time DESC''',
             (patient_id,)
         )
@@ -284,16 +296,30 @@ def get_pending_ct_orders(patient_id: int) -> list:
 
 
 def complete_ct_order(order_id: int) -> bool:
+    """
+    CT推理完成后：
+    1. check_order.status = 4（已完成）
+    2. medical_order.exec_status = 2（已完成）
+    """
     conn = get_conn()
     if not conn:
         return False
     try:
         cur = conn.cursor()
-        cur.execute("UPDATE check_order SET status=1 WHERE id=%s", (order_id,))
+        # 更新 check_order 状态为已完成(4)
+        cur.execute("UPDATE check_order SET status=4 WHERE id=%s", (order_id,))
+
+        # 查出关联的 medical_order.id（check_order.order_id 就是 medical_order.id）
+        cur.execute("SELECT order_id FROM check_order WHERE id=%s", (order_id,))
+        row = cur.fetchone()
+        if row and row[0]:
+            cur.execute("UPDATE medical_order SET exec_status=2 WHERE id=%s", (row[0],))
+
         conn.commit()
         return cur.rowcount > 0
     except Error as e:
         print(f"[MySQL] complete_ct_order 失败：{e}")
         return False
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()

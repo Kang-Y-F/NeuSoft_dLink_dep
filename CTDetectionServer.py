@@ -309,6 +309,56 @@ async def cluster_analysis(cluster_num: int = Query(2, ge=2, le=10)):
         for i, pid in enumerate(patient_ids)
     ]}
 
+# ══════════════════════════════════════════════════════════════
+#  相似病例检索（基于CT特征向量余弦相似度）
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/similar/{patient_id}", summary="检索相似病例", tags=["分析"])
+async def find_similar_patients(
+    patient_id: str,
+    top_k: int = Query(5, ge=1, le=20, description="返回相似患者数量"),
+):
+    """
+    基于CT特征向量的余弦相似度，检索与目标患者最相似的K个患者。
+    返回相似度评分及患者ID，由Spring Boot端补充姓名/病历等详情。
+    """
+    data = feature_load_all()
+    if patient_id not in data:
+        raise HTTPException(status_code=404, detail=f"患者 {patient_id} 无特征数据")
+    if len(data) < 2:
+        raise HTTPException(status_code=400, detail="特征库患者数不足")
+
+    # 目标特征
+    target_feat = data[patient_id].squeeze().astype(np.float32)
+    target_norm = np.linalg.norm(target_feat)
+    if target_norm < 1e-8:
+        raise HTTPException(status_code=400, detail="目标特征向量为零向量")
+
+    # 计算与所有其他患者的余弦相似度
+    results = []
+    for pid, feat in data.items():
+        if pid == patient_id:
+            continue
+        f = feat.squeeze().astype(np.float32)
+        n = np.linalg.norm(f)
+        if n < 1e-8:
+            continue
+        # 余弦相似度 = (A·B) / (|A|*|B|)
+        cos_sim = float(np.dot(target_feat, f) / (target_norm * n))
+        # 距离 = 1 - 相似度，相似度高 → 距离小
+        results.append({
+            "patientId":  pid,
+            "similarity": round(cos_sim, 4),
+            "distance":   round(1 - cos_sim, 4),
+        })
+
+    # 按相似度降序，取 top_k
+    results.sort(key=lambda x: x["similarity"], reverse=True)
+    return {
+        "target":  patient_id,
+        "count":   len(results[:top_k]),
+        "results": results[:top_k]
+    }
 
 # ══════════════════════════════════════════════════════════════
 #  静态文件 & CT前端
