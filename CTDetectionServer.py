@@ -1,4 +1,17 @@
-# CTDetectionServer.py
+from langchain_community.cache import RedisCache
+from langchain_core.globals import set_llm_cache
+import redis
+
+try:
+    redis_client = redis.Redis(host="127.0.0.1", port=6379, db=0)
+    redis_client.ping()
+    set_llm_cache(RedisCache(redis_client))
+    print("[Cache] Redis 缓存已启用")
+except Exception:
+    from langchain_core.caches import InMemoryCache
+    set_llm_cache(InMemoryCache())
+    print("[Cache] Redis 不可用，使用内存缓存")
+# ==========================================================================
 import os
 import uuid
 import shutil
@@ -360,6 +373,79 @@ async def find_similar_patients(
         "results": results[:top_k]
     }
 
+
+# ══════════════════════════════════════════════════════════════
+#  AI多模态病历生成（LangChain）
+# ══════════════════════════════════════════════════════════════
+
+@app.post("/ai/generate-report/{patient_id}", summary="AI多模态综合诊疗报告", tags=["AI报告"])
+async def generate_ai_report(patient_id: int):
+    """
+    LangChain 4步链式推理生成综合诊疗报告：
+    Step1: 影像质量评估
+    Step2: 检验指标综合分析
+    Step3: 跨模态关联推理（核心创新）
+    Step4: 结构化报告生成
+    """
+    from app.langchain_report.data_collector import collect_patient_data, format_data_for_prompt
+    from app.langchain_report.report_chain import generate_report
+
+    try:
+        # 1. 采集患者全部数据
+        raw_data = collect_patient_data(patient_id)
+
+        # 2. 格式化为Prompt输入
+        formatted = format_data_for_prompt(raw_data)
+
+        # 3. LangChain链式推理
+        result = generate_report(formatted)
+
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=f"AI生成失败：{result['error']}")
+
+        # 4. 返回完整结果（含中间步骤 + 最终报告）
+        return {
+            "code": 200,
+            "patient_id": patient_id,
+            "patient_name": raw_data["patient_info"]["name"],
+            "chain_steps": result["chain_steps"],
+            "report": result["final_report"],
+            "data_summary": {
+                "medical_records": len(raw_data["medical_records"]),
+                "check_reports": len(raw_data["check_reports"]),
+                "lab_reports": len(raw_data["lab_reports"]),
+                "prescriptions": len(raw_data["prescriptions"]),
+            }
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"报告生成异常：{str(e)}")
+
+
+@app.get("/ai/report-status/{patient_id}", summary="查询报告生成状态", tags=["AI报告"])
+async def report_status(patient_id: int):
+    """检查患者数据是否足够生成报告"""
+    from app.langchain_report.data_collector import collect_patient_data
+
+    try:
+        data = collect_patient_data(patient_id)
+        return {
+            "patient_id": patient_id,
+            "patient_name": data["patient_info"]["name"],
+            "ready": True,
+            "data_count": {
+                "medical_records": len(data["medical_records"]),
+                "check_reports": len(data["check_reports"]),
+                "lab_reports": len(data["lab_reports"]),
+                "prescriptions": len(data["prescriptions"]),
+            }
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 # ══════════════════════════════════════════════════════════════
 #  静态文件 & CT前端
 # ══════════════════════════════════════════════════════════════
@@ -373,4 +459,4 @@ async def ct_viewer():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("CTDetectionServer:app", host="0.0.0.0", port=8000, reload=False, log_level="info")
+    uvicorn.run("CTDetectionServer:app", host="0.0.0.0", port=8000, reload=False, log_level="info", timeout_keep_alive=180)

@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str
     CELERY_RESULT_BACKEND: str
 
+    DASHSCOPE_API_KEY: str
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8"
