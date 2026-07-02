@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     DASHSCOPE_API_KEY: str
 
+    JAVA_LAB_API_BASE_URL: str
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8"
