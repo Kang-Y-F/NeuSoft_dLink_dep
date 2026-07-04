@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import lab_endpoints
 from app.api import hl7_endpoints
+from app.api import preview_endpoints
 
 from app.core.celery import celery
 from app.api.endpoints import router as async_router
@@ -60,6 +61,7 @@ app.add_middleware(
 app.include_router(async_router, prefix="/api", tags=["异步推理"])
 app.include_router(lab_endpoints.router)
 app.include_router(hl7_endpoints.router)
+app.include_router(preview_endpoints.router)
 @app.on_event("startup")
 def on_startup():
     init_db()

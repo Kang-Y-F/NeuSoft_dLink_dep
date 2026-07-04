@@ -22,6 +22,12 @@ class Settings(BaseSettings):
 
     JAVA_LAB_API_BASE_URL: str
 
+    OSS_BUCKET: str
+    OSS_ENDPOINT: str
+    OSS_ACCESS_KEY_ID: str
+    OSS_ACCESS_KEY_SECRET: str
+    OSS_BASE_URL: str
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8"

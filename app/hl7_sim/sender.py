@@ -55,18 +55,16 @@ async def send_cgm_series_to_java(
     check_order_id: str,
     item_name: str,
     series: List[Dict[str, Any]],
-    reference_range: str = "3.9-10.0"
+    reference_range: str = "3.9-10.0",
+    suite_group: Optional[str] = None
 ) -> HL7SendResult:
-    """
-    CGM 序列：改成一次性批量 POST，不再逐点循环调用。
-    """
     url = f"{settings.JAVA_LAB_API_BASE_URL}/lab-report/batch-create"
-
     items = [
         {
             "orderId": int(check_order_id),
             "patientId": int(patient_id),
             "itemName": item_name,
+            "suiteGroup": suite_group,
             "testValue": str(point["value"]),
             "referenceRange": reference_range,
             "description": "（HL7仿真-CGM）",

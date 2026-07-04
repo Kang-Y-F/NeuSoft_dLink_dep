@@ -26,7 +26,7 @@ subprocess.Popen(
 )
 
 # 3. 启动 FastAPI（直接用环境里的 python.exe）
-print("启动 FastAPI 服务...")
+print("启动  FastAPI 服务...")
 subprocess.Popen(
     ["cmd", "/k",
      os.path.join(CONDA_ENV_PATH, "python.exe"), "CTDetectionServer.py"],
