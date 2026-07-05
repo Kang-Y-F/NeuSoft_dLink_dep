@@ -45,7 +45,7 @@ def init_db():
 
     cur.execute('''
     CREATE TABLE IF NOT EXISTS ct_patient_features (
-        patient_id   VARCHAR(64)  PRIMARY KEY,
+        patient_id   BIGINT       NOT NULL PRIMARY KEY,
         feature      LONGBLOB     NOT NULL,
         model_type   VARCHAR(32)  NOT NULL,
         updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP

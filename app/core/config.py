@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: str
 
     JAVA_LAB_API_BASE_URL: str
+    SERVICE_BASE_URL: str = "http://localhost:8000"
 
     OSS_BUCKET: str
     OSS_ENDPOINT: str

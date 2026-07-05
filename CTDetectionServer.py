@@ -336,11 +336,12 @@ async def find_similar_patients(
     patient_id: str,
     top_k: int = Query(5, ge=1, le=20, description="返回相似患者数量"),
 ):
-    """
-    基于CT特征向量的余弦相似度，检索与目标患者最相似的K个患者。
-    返回相似度评分及患者ID，由Spring Boot端补充姓名/病历等详情。
-    """
     data = feature_load_all()
+    print(f"[DEBUG] 原始 keys: {list(data.keys())}, 类型: {[type(k) for k in data.keys()]}")
+    data = {str(k): v for k, v in data.items()}
+    print(f"[DEBUG] 归一化后 keys: {list(data.keys())}")
+    print(f"[DEBUG] 传入的 patient_id: {patient_id!r}, 是否在data中: {patient_id in data}")
+
     if patient_id not in data:
         raise HTTPException(status_code=404, detail=f"患者 {patient_id} 无特征数据")
     if len(data) < 2:
