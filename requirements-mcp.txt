@@ -1,0 +1,6 @@
+
+# MCP Server专用依赖
+mcp>=0.9.0
+psycopg2-binary>=2.9.0
+pymysql>=1.1.0
+requests>=2.31.0

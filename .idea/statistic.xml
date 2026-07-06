@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Statistic">
+    <option name="excludedDirectories">
+      <list>
+        <option value="$PROJECT_DIR$/tmp" />
+        <option value="$PROJECT_DIR$/dist" />
+        <option value="$PROJECT_DIR$/.git" />
+        <option value="$PROJECT_DIR$/.idea" />
+        <option value="$PROJECT_DIR$/__pycache__" />
+        <option value="$PROJECT_DIR$/build" />
+      </list>
+    </option>
+  </component>
+</project>
