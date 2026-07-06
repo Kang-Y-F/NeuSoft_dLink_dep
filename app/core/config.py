@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     OSS_ACCESS_KEY_SECRET: str
     OSS_BASE_URL: str
 
+    PGVECTOR_HOST: str
+    PGVECTOR_PORT: int
+    PGVECTOR_USER: str
+    PGVECTOR_PASSWORD: str
+    PGVECTOR_DB : str
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8"

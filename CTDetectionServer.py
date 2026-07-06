@@ -28,14 +28,25 @@ from app.api import preview_endpoints
 
 from app.core.celery import celery
 from app.api.endpoints import router as async_router
+
+# ── MySQL：继续存患者基本信息、检查单、报告等所有原有业务数据 ──────────
 from app.db.mysql import (
     init_db,
     task_create, task_update,
-    feature_upsert, feature_load_all,
-    feature_list_patients, feature_delete,
     report_upsert, get_conn,
     get_pending_ct_orders, complete_ct_order,
 )
+
+# ── pgvector：只负责 CT 特征向量的存取（相似度检索 / 聚类分析）─────────
+from app.db.pgvector_store import (
+    init_pgvector_db,
+    feature_upsert_vec,
+    find_similar_vec,
+    feature_delete_vec,
+    feature_list_patients_vec,
+    feature_load_all_vec,
+)
+
 from Detection.CTArtifactInfer import CTArtifactInfer
 from Detection.model_enum import ModelType
 
@@ -62,10 +73,14 @@ app.include_router(async_router, prefix="/api", tags=["异步推理"])
 app.include_router(lab_endpoints.router)
 app.include_router(hl7_endpoints.router)
 app.include_router(preview_endpoints.router)
+
+
 @app.on_event("startup")
 def on_startup():
     init_db()
-    print("✅ 服务启动完成，MySQL 初始化完毕")
+    print("✅ MySQL 初始化完毕")
+    init_pgvector_db()
+    print("✅ 服务启动完成")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -157,11 +172,11 @@ async def infer_nii(
         pixel_count = int(np.sum(mask_arr > 0))
         feat_shape  = str(feature_vector.shape) if feature_vector is not None else "None"
 
-        # ── 特征写库 ──────────────────────────────────────────────
+        # ── 特征写入 pgvector（原来是写 MySQL，现在改成写向量库）─────
         if save_feature and feature_vector is not None and patient_id:
-            feature_upsert(patient_id, feature_vector, model_type)
+            feature_upsert_vec(int(patient_id), feature_vector, model_type)
 
-        # ── 写 check_report（掩码URL + CT URL 都存入）────────────
+        # ── 写 check_report（掩码URL + CT URL 都存入，仍走 MySQL）────
         write_patient_id = his_patient_id or (
             int(patient_id) if patient_id and patient_id.isdigit() else None
         )
@@ -234,7 +249,7 @@ async def extract_volume_feature(
             nii_path=temp_nii_path, return_average=return_average
         )
         if patient_id:
-            feature_upsert(patient_id, feat, model_type)
+            feature_upsert_vec(int(patient_id), feat, model_type)
         feat_bytes = feat.tobytes()
         return StreamingResponse(
             iter([feat_bytes]),
@@ -257,13 +272,13 @@ async def extract_volume_feature(
 
 @app.get("/patients/list", summary="获取已录入患者列表", tags=["患者管理"])
 async def get_patient_list():
-    rows = feature_list_patients()
+    rows = feature_list_patients_vec()
     return {"count": len(rows), "patients": [r["patient_id"] for r in rows], "detail": rows}
 
 
 @app.delete("/patients/{patient_id}", summary="删除指定患者特征", tags=["患者管理"])
 async def delete_patient(patient_id: str):
-    ok = feature_delete(patient_id)
+    ok = feature_delete_vec(int(patient_id))
     if not ok:
         raise HTTPException(status_code=404, detail="该患者特征不存在")
     return {"msg": f"患者 {patient_id} 特征已删除"}
@@ -281,7 +296,7 @@ async def save_patient_feature(
         feat = np.load(io.BytesIO(raw))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"特征文件解析失败：{e}")
-    ok = feature_upsert(patient_id, feat, model_type)
+    ok = feature_upsert_vec(int(patient_id), feat, model_type)
     if not ok:
         raise HTTPException(status_code=500, detail="特征入库失败")
     return {"msg": f"患者 {patient_id} 特征入库成功", "feature_shape": str(feat.shape)}
@@ -310,11 +325,11 @@ async def cluster_analysis(cluster_num: int = Query(2, ge=2, le=10)):
     from sklearn.manifold import TSNE
     from sklearn.cluster import KMeans
 
-    data = feature_load_all()
+    data = feature_load_all_vec()
     if len(data) < 3:
         raise HTTPException(status_code=400, detail=f"聚类至少需要 3 名患者，当前仅有 {len(data)} 名")
 
-    patient_ids = list(data.keys())
+    patient_ids = [str(k) for k in data.keys()]
     feat_array  = np.array([v.squeeze() for v in data.values()], dtype=np.float32)
     perplexity  = min(30, len(patient_ids) - 1)
     tsne        = TSNE(n_components=2, random_state=42, perplexity=perplexity)
@@ -327,57 +342,25 @@ async def cluster_analysis(cluster_num: int = Query(2, ge=2, le=10)):
         for i, pid in enumerate(patient_ids)
     ]}
 
+
 # ══════════════════════════════════════════════════════════════
-#  相似病例检索（基于CT特征向量余弦相似度）
+#  相似病例检索（pgvector：HNSW 近似最近邻 + 余弦距离）
 # ══════════════════════════════════════════════════════════════
 
 @app.get("/similar/{patient_id}", summary="检索相似病例", tags=["分析"])
 async def find_similar_patients(
-    patient_id: str,
+    patient_id: int,
     top_k: int = Query(5, ge=1, le=20, description="返回相似患者数量"),
 ):
-    data = feature_load_all()
-    print(f"[DEBUG] 原始 keys: {list(data.keys())}, 类型: {[type(k) for k in data.keys()]}")
-    data = {str(k): v for k, v in data.items()}
-    print(f"[DEBUG] 归一化后 keys: {list(data.keys())}")
-    print(f"[DEBUG] 传入的 patient_id: {patient_id!r}, 是否在data中: {patient_id in data}")
-
-    if patient_id not in data:
+    """
+    基于CT特征向量的余弦相似度，检索与目标患者最相似的K个患者。
+    底层由 pgvector 的 HNSW 索引完成近似最近邻检索，
+    而不是把全部特征读到内存里逐个计算（那是旧版 MySQL 方案的做法）。
+    """
+    results = find_similar_vec(patient_id, top_k)
+    if results is None:
         raise HTTPException(status_code=404, detail=f"患者 {patient_id} 无特征数据")
-    if len(data) < 2:
-        raise HTTPException(status_code=400, detail="特征库患者数不足")
-
-    # 目标特征
-    target_feat = data[patient_id].squeeze().astype(np.float32)
-    target_norm = np.linalg.norm(target_feat)
-    if target_norm < 1e-8:
-        raise HTTPException(status_code=400, detail="目标特征向量为零向量")
-
-    # 计算与所有其他患者的余弦相似度
-    results = []
-    for pid, feat in data.items():
-        if pid == patient_id:
-            continue
-        f = feat.squeeze().astype(np.float32)
-        n = np.linalg.norm(f)
-        if n < 1e-8:
-            continue
-        # 余弦相似度 = (A·B) / (|A|*|B|)
-        cos_sim = float(np.dot(target_feat, f) / (target_norm * n))
-        # 距离 = 1 - 相似度，相似度高 → 距离小
-        results.append({
-            "patientId":  pid,
-            "similarity": round(cos_sim, 4),
-            "distance":   round(1 - cos_sim, 4),
-        })
-
-    # 按相似度降序，取 top_k
-    results.sort(key=lambda x: x["similarity"], reverse=True)
-    return {
-        "target":  patient_id,
-        "count":   len(results[:top_k]),
-        "results": results[:top_k]
-    }
+    return {"target": patient_id, "count": len(results), "results": results}
 
 
 # ══════════════════════════════════════════════════════════════
