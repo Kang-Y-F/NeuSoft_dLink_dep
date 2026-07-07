@@ -1,5 +1,6 @@
 from langchain_community.cache import RedisCache
 from langchain_core.globals import set_llm_cache
+
 import redis
 
 try:
@@ -49,8 +50,10 @@ from app.db.pgvector_store import (
 
 from Detection.CTArtifactInfer import CTArtifactInfer
 from Detection.model_enum import ModelType
+from Detection.ArtifactRemovalInfer import ArtifactRemovalInfer
 
 WEIGHT_PATH      = "./Model/weights/nor_best.pth"
+REMOVAL_MODEL_PATH = "./Model/weights/InDuDoNet+_latest.pt"
 TMP_DIR          = "./tmp"
 SERVICE_BASE_URL = "http://localhost:8000"
 os.makedirs(TMP_DIR, exist_ok=True)
@@ -82,6 +85,16 @@ def on_startup():
     init_pgvector_db()
     print("✅ 服务启动完成")
 
+
+
+# ── 用一个全局单例，避免每次请求都重新加载几百MB的模型权重 ──
+_artifact_remover = None
+
+def get_artifact_remover():
+    global _artifact_remover
+    if _artifact_remover is None:
+        _artifact_remover = ArtifactRemovalInfer(model_dir=REMOVAL_MODEL_PATH)
+    return _artifact_remover
 
 # ══════════════════════════════════════════════════════════════
 #  基础接口
@@ -406,6 +419,180 @@ async def report_status(patient_id: int):
         }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ══════════════════════════════════════════════════════════════
+#  金属伪影去除接口（新增）
+# ══════════════════════════════════════════════════════════════
+
+@app.post("/infer/remove_artifact", summary="金属伪影分割+去除一体化推理", tags=["推理"])
+async def infer_remove_artifact(
+    file: UploadFile = File(...),
+    patient_id:     str  = Query(""),
+    model_type:     str  = Query(ModelType.UNET2D),
+    save_result:    bool = Query(True),
+    order_id:       int  = Query(None),
+    his_patient_id: int  = Query(None),
+):
+    task_id = str(uuid.uuid4())
+    temp_nii_path = os.path.join(TMP_DIR, f"{task_id}_{file.filename}")
+    with open(temp_nii_path, "wb") as f:
+        f.write(await file.read())
+
+    safe_pid = patient_id.replace("/", "_") if patient_id else "unknown"
+
+    try:
+        seg_engine = CTArtifactInfer(model_weight_path=WEIGHT_PATH, model_type=model_type)
+        sitk_ct = sitk.ReadImage(temp_nii_path)
+        ct_vol  = sitk.GetArrayFromImage(sitk_ct)
+        sitk_mask, _ = seg_engine.predict_from_sitk(sitk_ct)
+        mask_vol = sitk.GetArrayFromImage(sitk_mask)
+
+        remover = get_artifact_remover()
+        clean_vol = remover.remove_artifact_volume(ct_vol.astype(np.float32), mask_vol)
+
+        # 保存去伪影结果文件
+        dearti_filename = f"{safe_pid}_dearti.nii.gz"
+        dearti_path = os.path.join(TMP_DIR, dearti_filename)
+        sitk_clean = sitk.GetImageFromArray(clean_vol)
+        sitk_clean.CopyInformation(sitk_ct)
+        sitk.WriteImage(sitk_clean, dearti_path)
+        dearti_url = f"{SERVICE_BASE_URL}/mask/{dearti_filename}"
+
+        artifact_pixel_count = int(np.sum(mask_vol > 0))
+
+        # 写入数据库（需要你在mysql.py里给report_upsert加dearti_ct_path参数）
+        write_patient_id = his_patient_id or (int(patient_id) if patient_id.isdigit() else None)
+        if write_patient_id:
+            report_upsert(
+                patient_id=write_patient_id,
+                order_id=order_id,
+                mask_path="",  # 这里保持和分割接口一致，或按需填
+                ct_path="",
+                dearti_ct_path=dearti_url,   # 新增字段
+                artifact_pixel_count=artifact_pixel_count,
+                feature_shape="",
+            )
+
+        return {
+            "code": 200,
+            "msg": "去伪影完成",
+            "artifact_pixel_count": artifact_pixel_count,
+            "dearti_ct_url": dearti_url,
+        }
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"去伪影推理异常：{e}")
+    finally:
+        if os.path.exists(temp_nii_path):
+            os.remove(temp_nii_path)
+
+# ══════════════════════════════════════════════════════════════
+#  分割 + 去伪影 一体化接口（写入同一条 check_report 记录）
+# ══════════════════════════════════════════════════════════════
+
+@app.post("/infer/segment_and_remove", summary="CT伪影分割+去除一体化推理", tags=["推理"])
+async def infer_segment_and_remove(
+    file: UploadFile = File(...),
+    patient_id:     str  = Query(""),
+    model_type:     str  = Query(ModelType.UNET2D),
+    save_mask:      bool = Query(True),
+    save_dearti:    bool = Query(True),
+    mask_filename:  str  = Query("artifact_mask.nii.gz"),
+    save_feature:   bool = Query(True),
+    order_id:       int  = Query(None),
+    his_patient_id: int  = Query(None),
+):
+    task_id       = str(uuid.uuid4())
+    temp_nii_name = f"{task_id}_{file.filename}"
+    temp_nii_path = os.path.join(TMP_DIR, temp_nii_name)
+
+    with open(temp_nii_path, "wb") as f:
+        f.write(await file.read())
+
+    safe_pid = patient_id.replace("/", "_") if patient_id else "unknown"
+
+    actual_mask_filename = f"{safe_pid}_mask.nii.gz"
+    mask_save_path = os.path.join(TMP_DIR, actual_mask_filename)
+
+    ct_save_filename = f"{safe_pid}_ct.nii.gz"
+    ct_save_path     = os.path.join(TMP_DIR, ct_save_filename)
+
+    dearti_filename = f"{safe_pid}_dearti.nii.gz"
+    dearti_save_path = os.path.join(TMP_DIR, dearti_filename)
+
+    try:
+        # ── 保存原始CT，供前端渲染用 ──────────────────────────
+        shutil.copy2(temp_nii_path, ct_save_path)
+        ct_url = f"{SERVICE_BASE_URL}/mask/{ct_save_filename}"
+
+        # ── 第一步：分割，拿mask ──────────────────────────────
+        seg_engine = CTArtifactInfer(
+            model_weight_path=WEIGHT_PATH,
+            model_type=model_type,
+        )
+        sitk_ct = sitk.ReadImage(temp_nii_path)
+        ct_vol  = sitk.GetArrayFromImage(sitk_ct)
+
+        sitk_mask, feature_vector = seg_engine.predict_from_sitk(
+            sitk_ct,
+            save_mask_path=mask_save_path if save_mask else None,
+        )
+        mask_vol = sitk.GetArrayFromImage(sitk_mask)
+        artifact_pixel_count = int(np.sum(mask_vol > 0))
+        feat_shape = str(feature_vector.shape) if feature_vector is not None else "None"
+
+        mask_url = f"{SERVICE_BASE_URL}/mask/{actual_mask_filename}" if save_mask else ""
+
+        # ── 第二步：去伪影 ───────────────────────────────────
+        dearti_url = ""
+        if save_dearti:
+            remover = get_artifact_remover()
+            clean_vol = remover.remove_artifact_volume(ct_vol.astype(np.float32), mask_vol)
+            sitk_clean = sitk.GetImageFromArray(clean_vol)
+            sitk_clean.CopyInformation(sitk_ct)
+            sitk.WriteImage(sitk_clean, dearti_save_path)
+            dearti_url = f"{SERVICE_BASE_URL}/mask/{dearti_filename}"
+
+        # ── 特征写入 pgvector ────────────────────────────────
+        if save_feature and feature_vector is not None and patient_id:
+            feature_upsert_vec(int(patient_id), feature_vector, model_type)
+
+        # ── 一次性写入 check_report，同时带mask+ct+去伪影结果 ──
+        write_patient_id = his_patient_id or (
+            int(patient_id) if patient_id and patient_id.isdigit() else None
+        )
+        if write_patient_id:
+            report_upsert(
+                patient_id=write_patient_id,
+                order_id=order_id,
+                mask_path=mask_url,
+                ct_path=ct_url,
+                dearti_ct_path=dearti_url,
+                artifact_pixel_count=artifact_pixel_count,
+                feature_shape=feat_shape,
+                report_text="CT伪影分割+去除完成",
+            )
+
+        if order_id:
+            complete_ct_order(order_id)
+
+        return {
+            "code":                 200,
+            "msg":                  "分割+去伪影完成",
+            "artifact_pixel_count": artifact_pixel_count,
+            "feature_shape":        feat_shape,
+            "ct_url":               ct_url,
+            "mask_url":             mask_url,
+            "dearti_ct_url":        dearti_url,
+        }
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"推理异常：{e}")
+    finally:
+        if os.path.exists(temp_nii_path):
+            os.remove(temp_nii_path)
 # ══════════════════════════════════════════════════════════════
 #  静态文件 & CT前端
 # ══════════════════════════════════════════════════════════════

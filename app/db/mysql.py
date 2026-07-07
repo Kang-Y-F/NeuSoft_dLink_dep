@@ -209,6 +209,7 @@ def report_upsert(
     artifact_pixel_count: int,
     feature_shape: str,
     ct_path: str = "",
+    dearti_ct_path: str = "",
     report_text: str = "CT伪影分割完成"
 ) -> bool:
     conn = get_conn()
@@ -238,10 +239,10 @@ def report_upsert(
         cur.execute(
             '''INSERT INTO check_report
                (order_id, patient_id, img_type, image_url, ct_url,
-                artifact_result, report_text)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)''',
+                dearti_ct_url, artifact_result, report_text)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)''',
             (medical_order_id, patient_id, "CT", mask_path, ct_path,
-             artifact_result, report_text)
+             dearti_ct_path, artifact_result, report_text)
         )
         conn.commit()
         print(f"[DEBUG report_upsert] 写入成功 patient_id={patient_id} order_id={medical_order_id}")
