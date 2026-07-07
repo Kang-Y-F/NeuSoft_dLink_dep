@@ -7,6 +7,7 @@
 # ============================================================
 
 import os
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -158,7 +159,22 @@ class ArtifactRemovalInfer:
             self,
             ct_slice: np.ndarray,
             mask_slice: np.ndarray,
+            blend_radius: int = 25,
     ) -> np.ndarray:
+        # ── 修正：用标准CT物理公式，把HU值转换成线衰减系数μ（网络真正训练时用的物理量）──
+        def hu_to_mu(hu_data, mu_water=_MIU_WATER):
+            """
+            HU -> 线衰减系数μ（标准CT物理转换公式）
+            μ_water=0.192 是这套网络训练时约定的水衰减系数
+            """
+            mu = mu_water * (hu_data / 1000.0 + 1.0)
+            mu = np.clip(mu, 0.0, None)  # 空气以下的padding值(比如-3024)转换后会是负数，裁剪到0
+            return mu.astype(np.float32)
+
+        def mu_to_hu(mu_data, mu_water=_MIU_WATER):
+            """线衰减系数μ -> HU（上面公式的逆运算）"""
+            hu = (mu_data / mu_water - 1.0) * 1000.0
+            return hu.astype(np.float32)
         """
         对单张CT切片去除金属伪影。
 
@@ -169,17 +185,20 @@ class ArtifactRemovalInfer:
         assert ct_slice.shape == mask_slice.shape, "CT图像和mask尺寸必须一致"
         orig_H, orig_W = ct_slice.shape
 
-        # ── 关键新增：ray_trafo投影几何固定要求416x416输入，先resize ──
+        # ── 关键新增：先把HU值转换到网络期望的[0,1]范围 ──
+        ct_slice_mu = hu_to_mu(ct_slice)
+
         NET_SIZE = 416
         need_resize = (orig_H != NET_SIZE or orig_W != NET_SIZE)
 
         if need_resize:
-            Xma_raw = cv2.resize(ct_slice.astype(np.float32), (NET_SIZE, NET_SIZE), interpolation=cv2.INTER_LINEAR)
+            Xma_raw = cv2.resize(ct_slice_mu, (NET_SIZE, NET_SIZE), interpolation=cv2.INTER_LINEAR)
             M = cv2.resize(mask_slice.astype(np.float32), (NET_SIZE, NET_SIZE), interpolation=cv2.INTER_NEAREST)
             M = (M > 0.5).astype(np.float32)
         else:
-            Xma_raw = ct_slice.astype(np.float32)
+            Xma_raw = ct_slice_mu
             M = (mask_slice > 0.5).astype(np.float32)
+
 
         # 1) 正向投影，得到带伪影正弦图 Sma_raw
         Xma_t = torch.from_numpy(Xma_raw).unsqueeze(0).unsqueeze(0).to(self.device)
@@ -229,11 +248,32 @@ class ArtifactRemovalInfer:
 
         Xout = ListX[-1].squeeze().cpu().numpy()
 
-        # ── 关键新增：resize回原始尺寸 ──
+        mu_out = Xout / 255.0
+        Xout = mu_to_hu(mu_out)
+
         if need_resize:
             Xout = cv2.resize(Xout, (orig_W, orig_H), interpolation=cv2.INTER_LINEAR)
 
-        return Xout
+        # ── 关键新增：只在金属附近区域采用处理结果，其余区域保留原图 ──
+        # 用形态学膨胀，把mask区域向外扩一圈，作为"需要处理"的范围
+        mask_orig_size = mask_slice.astype(np.uint8)
+        kernel = np.ones((blend_radius, blend_radius), np.uint8)
+        blend_region = cv2.dilate(mask_orig_size, kernel, iterations=1).astype(np.float32)
+
+        # 边缘做一点羽化，避免"处理区/原图区"交界处出现明显生硬的边界线
+        blend_region = cv2.GaussianBlur(blend_region, (15, 15), 0)
+        blend_region = np.clip(blend_region, 0, 1)
+
+        # 加权融合：金属附近用Xout，远处用原图ct_slice
+        final_out = Xout * blend_region + ct_slice.astype(np.float32) * (1 - blend_region)
+
+        plt.imsave('D:/temp_debug/debug_mask.png', mask_slice, cmap='gray')
+        plt.imsave('D:/temp_debug/debug_ct.png', np.clip(ct_slice, -200, 1000), cmap='gray')
+        plt.imsave('D:/temp_debug/debug_blend_region.png', blend_region, cmap='gray')
+        plt.imsave('D:/temp_debug/debug_xout.png', Xout, cmap='gray')
+        print(f"mask覆盖比例: {mask_slice.sum() / mask_slice.size * 100:.1f}%")
+
+        return final_out
 
     # ---------------- 整卷CT批量去伪影 ----------------
 
