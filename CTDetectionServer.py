@@ -3,6 +3,13 @@ from langchain_core.globals import set_llm_cache
 
 import redis
 
+from app.langchain_report.report_chain import (
+    generate_report,
+    get_report_progress,
+    list_report_checkpoints,
+    get_checkpoint_detail,
+)
+
 try:
     redis_client = redis.Redis(host="127.0.0.1", port=6379, db=0)
     redis_client.ping()
@@ -47,6 +54,7 @@ from app.db.pgvector_store import (
     feature_list_patients_vec,
     feature_load_all_vec,
 )
+from app.langchain_report.checkpoint import init_checkpointer
 
 from Detection.CTArtifactInfer import CTArtifactInfer
 from Detection.model_enum import ModelType
@@ -83,8 +91,10 @@ def on_startup():
     init_db()
     print("✅ MySQL 初始化完毕")
     init_pgvector_db()
+    print("✅ pgvector 初始化完毕")
+    init_checkpointer()
+    print("✅ LangGraph checkpointer 初始化完毕（PG检查表已就绪）")
     print("✅ 服务启动完成")
-
 
 
 # ── 用一个全局单例，避免每次请求都重新加载几百MB的模型权重 ──
@@ -263,7 +273,13 @@ async def extract_volume_feature(
         )
         if patient_id:
             feature_upsert_vec(int(patient_id), feat, model_type)
-        feat_bytes = feat.tobytes()
+
+        # ── 修复：用 np.save 写出真正的 .npy 格式，而不是裸 tobytes() ──
+        import io
+        buf = io.BytesIO()
+        np.save(buf, feat)
+        feat_bytes = buf.getvalue()
+
         return StreamingResponse(
             iter([feat_bytes]),
             media_type="application/octet-stream",
@@ -377,27 +393,37 @@ async def find_similar_patients(
 
 
 # ══════════════════════════════════════════════════════════════
-#  AI多模态病历生成（LangChain）
+#  AI多模态病历生成（LangGraph + checkpoint）
+#  分工：Python 只负责跑图 / 读写 PG checkpoint，不碰 MySQL。
+#        thread_id 由 Java 一侧生成并作为 query 参数传入，
+#        这样即使本次调用超时/进程崩溃，Java 那边也已经落库了 thread_id，
+#        可以据此调用 /resume 接口续跑。
 # ══════════════════════════════════════════════════════════════
 
-@app.post("/ai/generate-report/{patient_id}", summary="AI多模态综合诊疗报告", tags=["AI报告"])
-async def generate_ai_report(patient_id: int):
-    from app.langchain_report.report_chain import generate_report
-    try:
-        result = generate_report(patient_id)
-        if result.get("error") and not result.get("final_report"):
-            raise HTTPException(status_code=500, detail=f"AI生成失败：{result['error']}")
-        return {
-            "code": 200,
-            "patient_id": patient_id,
-            "patient_name": result["patient_name"],
-            "chain_steps": result["chain_steps"],
-            "report": result["final_report"],
-        }
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"报告生成异常：{str(e)}")
+@app.post("/ai/generate-report/{patient_id}", summary="AI多模态综合诊疗报告（新生成）", tags=["AI报告"])
+def api_generate_report(patient_id: int, thread_id: str = Query(..., description="由调用方（Java）生成的线程ID")):
+    return generate_report(patient_id, thread_id=thread_id, resume=False)
+
+
+@app.post("/ai/generate-report/{patient_id}/resume", summary="断点续跑AI报告", tags=["AI报告"])
+def api_resume_report(patient_id: int, thread_id: str = Query(..., description="上次生成时使用的线程ID")):
+    return generate_report(patient_id, thread_id=thread_id, resume=True)
+
+
+@app.get("/ai/generate-report/progress", summary="查询生成进度（只读，不触发LLM）", tags=["AI报告"])
+def api_progress(thread_id: str = Query(...)):
+    return get_report_progress(thread_id)
+
+
+@app.get("/ai/generate-report/checkpoints", summary="列出该线程的所有历史checkpoint", tags=["AI报告"])
+def api_checkpoints(thread_id: str = Query(...)):
+    return list_report_checkpoints(thread_id)
+
+
+@app.get("/ai/generate-report/checkpoints/{checkpoint_id}", summary="查看某个checkpoint的完整状态", tags=["AI报告"])
+def api_checkpoint_detail(checkpoint_id: str, thread_id: str = Query(...)):
+    return get_checkpoint_detail(thread_id, checkpoint_id)
+
 
 @app.get("/ai/report-status/{patient_id}", summary="查询报告生成状态", tags=["AI报告"])
 async def report_status(patient_id: int):
@@ -422,7 +448,7 @@ async def report_status(patient_id: int):
 
 
 # ══════════════════════════════════════════════════════════════
-#  金属伪影去除接口（新增）
+#  金属伪影去除接口
 # ══════════════════════════════════════════════════════════════
 
 @app.post("/infer/remove_artifact", summary="金属伪影分割+去除一体化推理", tags=["推理"])
@@ -593,6 +619,8 @@ async def infer_segment_and_remove(
     finally:
         if os.path.exists(temp_nii_path):
             os.remove(temp_nii_path)
+
+
 # ══════════════════════════════════════════════════════════════
 #  静态文件 & CT前端
 # ══════════════════════════════════════════════════════════════

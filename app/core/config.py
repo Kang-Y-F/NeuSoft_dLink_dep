@@ -35,6 +35,20 @@ class Settings(BaseSettings):
     PGVECTOR_PASSWORD: str
     PGVECTOR_DB : str
 
+    # ── LangGraph checkpoint 专用库（跟pgvector同一台PG实例，库名不同）──
+    PG_CHECKPOINT_HOST: str
+    PG_CHECKPOINT_PORT: int
+    PG_CHECKPOINT_USER: str
+    PG_CHECKPOINT_PASSWORD: str
+    PG_CHECKPOINT_DB: str
+
+    @property
+    def PG_CHECKPOINT_URI(self) -> str:
+        return (
+            f"postgresql://{self.PG_CHECKPOINT_USER}:{self.PG_CHECKPOINT_PASSWORD}"
+            f"@{self.PG_CHECKPOINT_HOST}:{self.PG_CHECKPOINT_PORT}/{self.PG_CHECKPOINT_DB}"
+        )
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8"

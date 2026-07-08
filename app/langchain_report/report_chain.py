@@ -34,6 +34,7 @@ LangChain + LangGraph 多模态病历生成链
 """
 
 import json
+import uuid
 import operator
 from typing import TypedDict, List, Optional, Any
 from typing_extensions import Annotated
@@ -419,7 +420,7 @@ def node_fallback(state: ReportState) -> dict:
 #  组装 Graph
 # ══════════════════════════════════════════════════════════════
 
-def build_graph():
+def build_graph(checkpointer=None):
     workflow = StateGraph(ReportState)
 
     workflow.add_node("collect_data", node_collect_data)
@@ -459,35 +460,83 @@ def build_graph():
     )
     workflow.add_edge("fallback", END)
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)
 
 
-_GRAPH = build_graph()
-
+_GRAPH = None
+def get_graph():
+    global _GRAPH
+    if _GRAPH is None:
+        from app.langchain_report.checkpoint import get_checkpointer
+        _GRAPH = build_graph(get_checkpointer())
+    return _GRAPH
 
 # ══════════════════════════════════════════════════════════════
 #  对外暴露的入口函数（供 CTDetectionServer.py 的 /ai/generate-report/{id} 调用）
 # ══════════════════════════════════════════════════════════════
 
-def generate_report(patient_id: int) -> dict:
+def generate_report(patient_id: int, thread_id: str, resume: bool = False) -> dict:
     """
-    执行完整的图流程，返回：
-    {
-        "chain_steps": [...],      # 每一步的中间结果，供前端展示推理过程
-        "final_report": {...},     # 最终报告
-        "patient_name": "...",
-        "error": None 或 错误信息,
-    }
+    thread_id: 由Java一侧生成并传入，Python不再自己生成
+    resume=False → 全新一次生成（跑完整流程）
+    resume=True  → 从PG里这个thread_id的最后一次checkpoint继续跑
     """
+    config = {"configurable": {"thread_id": thread_id}}
+    graph = get_graph()
+
     try:
-        final_state = _GRAPH.invoke({"patient_id": patient_id})
+        final_state = (
+            graph.invoke(None, config) if resume
+            else graph.invoke({"patient_id": patient_id}, config)
+        )
+        report = final_state.get("final_report")
         return {
-            "chain_steps": final_state.get("chain_steps", []),
-            "final_report": final_state.get("final_report"),
+            "code": 200 if report else 500,
+            "thread_id": thread_id,
             "patient_name": final_state.get("patient_name", ""),
+            "report": report,
+            "chain_steps": final_state.get("chain_steps", []),
+            "data_summary": final_state.get("formatted_data"),
             "error": final_state.get("error"),
         }
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return {"chain_steps": [], "final_report": None, "patient_name": "", "error": str(e)}
+        return {
+            "code": 500,
+            "thread_id": thread_id,
+            "patient_name": "",
+            "report": None,
+            "chain_steps": [],
+            "data_summary": None,
+            "error": str(e),
+        }
+
+def get_report_progress(thread_id: str) -> dict:
+    """只读查看跑到哪一步了，不触发任何LLM调用——用来判断要不要走"续跑"分支"""
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = get_graph().get_state(config)
+    return {
+        "values": snapshot.values,
+        "next_node": snapshot.next,        # 空元组代表已经跑完
+        "is_finished": len(snapshot.next) == 0,
+    }
+
+
+def list_report_checkpoints(thread_id: str) -> list[dict]:
+    """列出这次生成过程的所有历史快照——对应你说的"回到仅完成影像+检验、还没做关联推理的中间状态" """
+    config = {"configurable": {"thread_id": thread_id}}
+    return [
+        {
+            "checkpoint_id": snap.config["configurable"]["checkpoint_id"],
+            "next_node": snap.next,
+            "chain_steps": snap.values.get("chain_steps", []),
+        }
+        for snap in get_graph().get_state_history(config)
+    ]
+
+
+def get_checkpoint_detail(thread_id: str, checkpoint_id: str) -> dict:
+    """查看某个历史checkpoint的完整状态快照（只读）"""
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
+    return get_graph().get_state(config).values
