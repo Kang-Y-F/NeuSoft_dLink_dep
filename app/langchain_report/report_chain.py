@@ -51,6 +51,8 @@ from app.core.config import settings
 from app.db.pgvector_store import find_similar_vec
 from app.db.reflection_store import query_top_reflections
 from app.langchain_report.data_collector import collect_patient_data, format_data_for_prompt
+from app.core.config import settings
+FORCE_DEMO_TOOLS = settings.FORCE_DEMO_TOOLS
 
 MAX_TOOL_CALLS   = 2   # correlation_agent 最多调用几轮工具，防止死循环
 MAX_REPORT_RETRY = 2   # 最终报告JSON解析失败最多重试几次
@@ -250,6 +252,7 @@ class ReportState(TypedDict, total=False):
     correlation_tool_calls: int
     correlation_tools_called: Annotated[List[str], operator.add]
     correlation_result: dict
+    correlation_force_context: Optional[str]
 
     final_report_raw: str
     final_report: Optional[dict]
@@ -307,16 +310,39 @@ def node_lab(state: ReportState) -> dict:
         "chain_steps": [{"step": 2, "name": "检验指标分析", "result": result}],
     }
 
+def node_correlation_force_tools(state: ReportState) -> dict:
+    """演示模式专用：不依赖模型自己判断，直接把两个工具都跑一遍，
+    结果作为 ToolMessage 预先塞进对话历史，模型基于这些结果直接生成结论。
+    正式环境不要开这个，会让 agent 变成写死流程。"""
+    patient_id = state["patient_id"]
+    tool_messages = []
+    tools_called = []
+
+    for tool_fn in TOOLS:
+        try:
+            content = tool_fn.invoke({"patient_id": patient_id, "top_k": 3})
+        except Exception as e:
+            content = f"工具调用异常：{e}"
+        print(f"[LangGraph][演示模式] 强制调用 {tool_fn.name} → {str(content)[:80]}...")
+        # 用一个假的 tool_call_id，因为这里不是真的模型发起的调用
+        tool_messages.append(ToolMessage(content=str(content), tool_call_id=f"forced_{tool_fn.name}"))
+        tools_called.append(tool_fn.name)
+
+    return {
+        "correlation_tools_called": tools_called,
+        "correlation_tool_calls": MAX_TOOL_CALLS,  # 直接置顶，后面route_correlation不会再触发真实调用
+        "correlation_force_context": "\n\n".join(str(m.content) for m in tool_messages),
+    }
 
 def node_correlation_agent(state: ReportState) -> dict:
-    """
-    correlation_agent 的第一次调用：组装消息，绑定工具，让模型自己决定要不要调用。
-    后续如果模型请求了工具，会在 node_correlation_tool 里执行，再回到这个节点继续对话
-    （所以这个节点其实会被反复进入，靠 correlation_messages 里已有的历史区分是第几轮）。
-    """
     print(f"[LangGraph] 节点: 跨模态关联推理（第 {state.get('correlation_tool_calls', 0) + 1} 轮）")
 
     if not state.get("correlation_messages"):
+        forced_context = state.get("correlation_force_context")
+        forced_block = (
+            f"\n\n━━━ 已预先检索到的参考信息（无需再调用工具） ━━━\n{forced_context}\n"
+            if forced_context else ""
+        )
         human_content = f"""
 ━━━ 患者信息 ━━━
 {state["formatted_data"]["patient_info"]}
@@ -332,7 +358,7 @@ def node_correlation_agent(state: ReportState) -> dict:
 
 ━━━ 当前用药 ━━━
 {state["formatted_data"]["prescriptions"]}
-
+{forced_block}
 请开始你的跨模态关联推理。患者ID是 {state["patient_id"]}，如需检索相似病例请用这个ID调用工具。
 """
         messages = [SystemMessage(content=CORRELATION_SYSTEM_PROMPT), HumanMessage(content=human_content)]
@@ -443,13 +469,14 @@ def node_fallback(state: ReportState) -> dict:
 # ══════════════════════════════════════════════════════════════
 #  组装 Graph
 # ══════════════════════════════════════════════════════════════
-
 def build_graph(checkpointer=None):
     workflow = StateGraph(ReportState)
 
     workflow.add_node("collect_data", node_collect_data)
     workflow.add_node("imaging", node_imaging)
     workflow.add_node("lab", node_lab)
+    if FORCE_DEMO_TOOLS:
+        workflow.add_node("correlation_force_tools", node_correlation_force_tools)
     workflow.add_node("correlation_agent", node_correlation_agent)
     workflow.add_node("correlation_tool", node_correlation_tool)
     workflow.add_node("correlation_finalize", node_correlation_finalize)
@@ -459,25 +486,25 @@ def build_graph(checkpointer=None):
 
     workflow.set_entry_point("collect_data")
 
-    # 并行分支：影像评估和检验分析互不依赖
     workflow.add_edge("collect_data", "imaging")
     workflow.add_edge("collect_data", "lab")
 
-    # 两个分支都完成后，汇合进入跨模态关联推理
-    workflow.add_edge("imaging", "correlation_agent")
-    workflow.add_edge("lab", "correlation_agent")
+    if FORCE_DEMO_TOOLS:
+        # 演示模式：imaging/lab 完成后先强制跑两个工具，再进 agent
+        workflow.add_edge("imaging", "correlation_force_tools")
+        workflow.add_edge("lab", "correlation_force_tools")
+        workflow.add_edge("correlation_force_tools", "correlation_agent")
+    else:
+        workflow.add_edge("imaging", "correlation_agent")
+        workflow.add_edge("lab", "correlation_agent")
 
-    # agent 工具调用循环
     workflow.add_conditional_edges(
         "correlation_agent", route_correlation,
         {"call_tool": "correlation_tool", "finalize": "correlation_finalize"},
     )
     workflow.add_edge("correlation_tool", "correlation_agent")
-
     workflow.add_edge("correlation_finalize", "generate_report")
     workflow.add_edge("generate_report", "validate_report")
-
-    # 报告JSON校验的条件重试
     workflow.add_conditional_edges(
         "validate_report", route_validate,
         {"success": END, "retry": "generate_report", "give_up": "fallback"},
@@ -485,7 +512,6 @@ def build_graph(checkpointer=None):
     workflow.add_edge("fallback", END)
 
     return workflow.compile(checkpointer=checkpointer)
-
 
 _GRAPH = None
 def get_graph():

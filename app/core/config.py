@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     JAVA_LAB_API_BASE_URL: str
     SERVICE_BASE_URL: str = "http://localhost:8000"
 
+    FORCE_DEMO_TOOLS: bool = False
+
     OSS_BUCKET: str
     OSS_ENDPOINT: str
     OSS_ACCESS_KEY_ID: str
