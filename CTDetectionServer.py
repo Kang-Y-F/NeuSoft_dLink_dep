@@ -36,6 +36,8 @@ from app.api import preview_endpoints
 
 from app.core.celery import celery
 from app.api.endpoints import router as async_router
+from app.api.reflection_api import router as reflection_router
+from app.db.reflection_store import init_reflection_table
 
 # ── MySQL：继续存患者基本信息、检查单、报告等所有原有业务数据 ──────────
 from app.db.mysql import (
@@ -85,6 +87,7 @@ app.include_router(lab_endpoints.router)
 app.include_router(hl7_endpoints.router)
 app.include_router(preview_endpoints.router)
 
+app.include_router(reflection_router)
 
 @app.on_event("startup")
 def on_startup():
@@ -94,8 +97,9 @@ def on_startup():
     print("✅ pgvector 初始化完毕")
     init_checkpointer()
     print("✅ LangGraph checkpointer 初始化完毕（PG检查表已就绪）")
+    init_reflection_table()              # ← 新增这行
+    print("✅ Reflection 记忆表初始化完毕")
     print("✅ 服务启动完成")
-
 
 # ── 用一个全局单例，避免每次请求都重新加载几百MB的模型权重 ──
 _artifact_remover = None
