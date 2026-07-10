@@ -2,6 +2,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 
 from app.lab_prediction.trend_predictor import (
     predict_linear_regression,
@@ -41,6 +42,17 @@ def _is_cgm_like(history: List[HistoryPoint]) -> bool:
         return False
 
 
+def _calc_avg_gap(history: List[HistoryPoint]) -> float:
+    if len(history) < 2:
+        return 0.0
+    try:
+        times = [datetime.fromisoformat(h.time) for h in history]
+        gaps = [(times[i + 1] - times[i]).total_seconds() / 60 for i in range(len(times) - 1)]
+        return float(sum(gaps) / len(gaps))
+    except Exception:
+        return 0.0
+
+
 @router.post("/trend")
 def predict_trend(req: TrendPredictRequest) -> Dict[str, Any]:
     values = [p.value for p in req.history]
@@ -50,10 +62,13 @@ def predict_trend(req: TrendPredictRequest) -> Dict[str, Any]:
         or (req.granularity == "auto" and _is_cgm_like(req.history))
     )
 
+    last_time = req.history[-1].time if req.history else None
+    avg_gap = _calc_avg_gap(req.history)
+
     if use_cgm:
-        result = predict_cgm_trend(values, steps=req.steps)
+        result = predict_cgm_trend(values, steps=req.steps, last_time=last_time, avg_gap_minutes=avg_gap)
     else:
-        result = predict_linear_regression(values, steps=req.steps)
+        result = predict_linear_regression(values, steps=req.steps, last_time=last_time, avg_gap_minutes=avg_gap)
 
     return {
         "code": 200,

@@ -1,7 +1,7 @@
 # app/lab_prediction/trend_predictor.py
 import numpy as np
 from typing import List, Dict, Optional
-
+from datetime import datetime, timedelta
 def predict_linear_trend(
     values: List[float],
     steps: int = 3
@@ -38,30 +38,31 @@ def predict_linear_trend(
 
 def predict_linear_regression(
     values: List[float],
-    steps: int = 3
+    steps: int = 3,
+    last_time: Optional[str] = None,
+    avg_gap_minutes: float = 0
 ) -> Dict:
-    """
-    更稳的版本：用全部历史点做最小二乘线性回归，
-    而不是只看最后两个点（Java 原逻辑只看最后两个点，
-    数据有波动时很不稳定）。这是建议优先换上的版本。
-    """
     n = len(values)
     if n < 2:
         return {"predictions": [], "trend": "平稳"}
 
     x = np.arange(n)
     y = np.array(values, dtype=float)
-    slope, intercept = np.polyfit(x, y, 1)  # 一次线性拟合
+    slope, intercept = np.polyfit(x, y, 1)
 
     predictions = []
     for i in range(1, steps + 1):
         pred_x = n - 1 + i
         pred_val = slope * pred_x + intercept
-        predictions.append({
-            "step": f"预测{i}",
+        item: Dict = {
             "value": round(float(pred_val), 2),
             "isPrediction": True
-        })
+        }
+        if last_time and avg_gap_minutes > 0:
+            dt = datetime.fromisoformat(last_time) + timedelta(minutes=avg_gap_minutes * i)
+            item["date"] = dt.strftime("%Y-%m-%d")
+            item["time"] = dt.isoformat(timespec="seconds")
+        predictions.append(item)
 
     if slope > 0.05:
         trend = "上升"
@@ -75,19 +76,15 @@ def predict_linear_regression(
 
 def predict_cgm_trend(
     values: List[float],
-    steps: int = 3
+    steps: int = 3,
+    last_time: Optional[str] = None,
+    avg_gap_minutes: float = 0
 ) -> Dict:
-    """
-    CGM（动态血糖）专用：数据点多、间隔短，
-    用最近一段的移动平均斜率做短期外推，
-    比单纯线性回归更贴近血糖短期波动的特性。
-    后续可以在这里换成 ARIMA / Holt-Winters / 小型 LSTM。
-    """
     n = len(values)
     if n < 4:
-        return predict_linear_regression(values, steps)
+        return predict_linear_regression(values, steps, last_time, avg_gap_minutes)
 
-    window = min(6, n)  # 取最近 6 个点算局部趋势，CGM 通常 5~15 分钟一个点
+    window = min(6, n)
     recent = np.array(values[-window:], dtype=float)
     x = np.arange(window)
     slope, intercept = np.polyfit(x, recent, 1)
@@ -95,11 +92,15 @@ def predict_cgm_trend(
     predictions = []
     for i in range(1, steps + 1):
         pred_val = recent[-1] + slope * i
-        predictions.append({
-            "step": f"预测{i}",
+        item: Dict = {
             "value": round(float(pred_val), 2),
             "isPrediction": True
-        })
+        }
+        if last_time and avg_gap_minutes > 0:
+            dt = datetime.fromisoformat(last_time) + timedelta(minutes=avg_gap_minutes * i)
+            item["date"] = dt.strftime("%Y-%m-%d")
+            item["time"] = dt.isoformat(timespec="seconds")
+        predictions.append(item)
 
     if slope > 0.5:
         trend = "上升"
