@@ -20,9 +20,9 @@ router = APIRouter(prefix="/infer", tags=["肿瘤检测"])
 
 # ── 和 CTDetectionServer.py 里保持一致的约定 ──────────────────
 TMP_DIR = "./tmp"
-SERVICE_BASE_URL = "http://localhost:8000"
+SERVICE_BASE_URL = "https://u762954-924e-d2896d39.westc.seetacloud.com:8443"
 # 换成你机器上lung_nodule_ct_detection bundle的实际路径
-TUMOR_BUNDLE_ROOT = os.environ.get("TUMOR_BUNDLE_ROOT", r"E:\lung_nodule_ct_detection")
+TUMOR_BUNDLE_ROOT = os.environ.get("TUMOR_BUNDLE_ROOT", "/root/autodl-tmp/lung_nodule_ct_detection")
 # ⚠️ 关键：必须指向 monai_tumor 这个conda环境的python.exe，
 # 不能用当前FastAPI主服务所在环境的解释器（主服务环境大概率没装monai）。
 # 换成你机器上实际的路径，用 `conda env list` 或 `where python`（在monai_tumor环境里执行）查看。

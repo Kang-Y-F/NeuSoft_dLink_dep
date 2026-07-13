@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: str
 
     JAVA_LAB_API_BASE_URL: str
-    SERVICE_BASE_URL: str = "http://localhost:8000"
+    SERVICE_BASE_URL: str = "https://u762954-924e-d2896d39.westc.seetacloud.com:8443"
 
     FORCE_DEMO_TOOLS: bool = False
 

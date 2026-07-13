@@ -13,7 +13,7 @@ from pydantic import BaseModel
 router = APIRouter(tags=["预览图生成"])
 
 TMP_DIR = "./tmp"
-SERVICE_BASE_URL = "http://localhost:8000"
+SERVICE_BASE_URL = "https://u762954-924e-d2896d39.westc.seetacloud.com:8443"
 
 
 class PreviewRequest(BaseModel):

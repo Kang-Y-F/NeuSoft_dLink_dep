@@ -17,7 +17,7 @@ from dashscope import TextEmbedding
 dashscope.api_key = os.environ.get("DASHSCOPE_API_KEY", "")
 
 # 初始化MCP Server
-server = FastMCP("Medical RAG MCP Server", host="0.0.0.0", port=8081)
+server = FastMCP("Medical RAG MCP Server", host="0.0.0.0", port=6008)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -154,7 +154,7 @@ def call_prediction_service(indicator: str, patient_id: int, history_data: List[
     """
     try:
         response = requests.post(
-            "http://localhost:8000/predict/trend",
+            "https://u762954-924e-d2896d39.westc.seetacloud.com:8443/predict/trend",
             json={
                 "indicator": indicator,
                 "patientId": str(patient_id),

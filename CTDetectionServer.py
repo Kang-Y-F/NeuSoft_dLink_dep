@@ -34,7 +34,6 @@ from app.api import lab_endpoints
 from app.api import hl7_endpoints
 from app.api import preview_endpoints
 from app.api import tumor_endpoints
-
 from app.core.celery import celery
 from app.api.endpoints import router as async_router
 from app.api.reflection_api import router as reflection_router
@@ -66,7 +65,7 @@ from Detection.ArtifactRemovalInfer import ArtifactRemovalInfer
 WEIGHT_PATH      = "./Model/weights/nor_best.pth"
 REMOVAL_MODEL_PATH = "./Model/weights/InDuDoNet+_latest.pt"
 TMP_DIR          = "./tmp"
-SERVICE_BASE_URL = "http://localhost:8000"
+SERVICE_BASE_URL = "https://u762954-924e-d2896d39.westc.seetacloud.com:8443"
 os.makedirs(TMP_DIR, exist_ok=True)
 
 app = FastAPI(
@@ -77,10 +76,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["*"],
-    allow_credentials = True,
-    allow_methods     = ["*"],
-    allow_headers     = ["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://u762954-924e-d2896d39.westc.seetacloud.com:8443",  # 如果前端也会部署到这个域名下
+    ],
+    allow_credentials=True,  # 注意：allow_origins=["*"] 时 allow_credentials 必须是 False，否则浏览器会报错
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(async_router, prefix="/api", tags=["异步推理"])
@@ -88,7 +90,6 @@ app.include_router(lab_endpoints.router)
 app.include_router(hl7_endpoints.router)
 app.include_router(preview_endpoints.router)
 app.include_router(tumor_endpoints.router)
-
 app.include_router(reflection_router)
 
 @app.on_event("startup")
@@ -640,4 +641,4 @@ async def ct_viewer():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("CTDetectionServer:app", host="0.0.0.0", port=8000, reload=False, log_level="info", timeout_keep_alive=180)
+    uvicorn.run("CTDetectionServer:app", host="0.0.0.0", port=6006, reload=False, log_level="info", timeout_keep_alive=180)

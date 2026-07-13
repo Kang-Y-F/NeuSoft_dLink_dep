@@ -96,6 +96,9 @@ class TumorDetectionInfer:
 
             boxes, scores, labels = self._parse_output(output_dir, case_filename)
 
+            print(f"📌 原始CT尺寸(WHD): {sitk_ct.GetSize()}, spacing: {sitk_ct.GetSpacing()}")
+            print(f"📌 模型输出boxes: {boxes}")
+
         mask_arr = self._boxes_to_mask(boxes, sitk_ct)
         sitk_mask = sitk.GetImageFromArray(mask_arr)
         sitk_mask.CopyInformation(sitk_ct)
@@ -115,6 +118,10 @@ class TumorDetectionInfer:
         ]
         print(f"📌 [TumorDetectionInfer] 执行命令: {' '.join(cmd)}")
 
+        env = os.environ.copy()
+        env["MKL_THREADING_LAYER"] = "GNU"
+        env["MKL_SERVICE_FORCE_INTEL"] = "1"
+
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -124,6 +131,7 @@ class TumorDetectionInfer:
                                     # 靠cwd被加入sys.path才能被MONAI动态import找到，
                                     # 不设置的话，FastAPI进程从哪个目录启动，就会报
                                     # ModuleNotFoundError: Cannot locate class or function path: 'scripts.xxx'
+            env=env,
         )
 
         if proc.returncode != 0:
@@ -132,6 +140,8 @@ class TumorDetectionInfer:
             raise TumorDetectionError(f"bundle CLI 推理失败（returncode={proc.returncode}）:\n{tail}")
 
         print(proc.stdout[-2000:])
+
+
 
     # ── 解析bundle输出 ───────────────────────────────────────
     # ⚠️ 注意：lung_nodule_ct_detection bundle 用自带的
@@ -188,23 +198,41 @@ class TumorDetectionInfer:
 
     # ── 检出框 -> 二值mask体积（供CtViewer复用红色叠加逻辑） ──
 
-    @staticmethod
-    def _boxes_to_mask(boxes: list, sitk_ct: sitk.Image) -> np.ndarray:
-        size = sitk_ct.GetSize()  # (W, H, D) —— sitk是(x,y,z)顺序
-        nx, ny, nz = size
-        mask = np.zeros((nz, ny, nx), dtype=np.int16)  # numpy数组是(D,H,W)顺序
+    def _boxes_to_mask(self, boxes: list, sitk_ct: sitk.Image, labels: list = None, scores: list = None,
+                       score_threshold: float = 0.5) -> np.ndarray:
+        size = sitk_ct.GetSize()
+        spacing = sitk_ct.GetSpacing()
+        mask = np.zeros((size[2], size[1], size[0]), dtype=np.uint8)
 
-        for box in boxes:
-            if len(box) != 6:
+        for i, box in enumerate(boxes):
+            if scores is not None and scores[i] < score_threshold:
                 continue
-            xmin, ymin, zmin, xmax, ymax, zmax = box
-            x0, x1 = sorted((int(round(xmin)), int(round(xmax))))
-            y0, y1 = sorted((int(round(ymin)), int(round(ymax))))
-            z0, z1 = sorted((int(round(zmin)), int(round(zmax))))
-            x0, x1 = max(0, x0), min(nx, x1)
-            y0, y1 = max(0, y0), min(ny, y1)
-            z0, z1 = max(0, z0), min(nz, z1)
-            if x1 > x0 and y1 > y0 and z1 > z0:
-                mask[z0:z1, y0:y1, x0:x1] = 1
+
+            cx, cy, cz, w, h, d = box
+            lps_point = (-cx, -cy, cz)
+            idx_x, idx_y, idx_z = sitk_ct.TransformPhysicalPointToContinuousIndex(lps_point)
+
+            half_w = (w / 2.0) / spacing[0]
+            half_h = (h / 2.0) / spacing[1]
+            half_d = (d / 2.0) / spacing[2]
+
+            xmin = int(round(idx_x - half_w));
+            xmax = int(round(idx_x + half_w))
+            ymin = int(round(idx_y - half_h));
+            ymax = int(round(idx_y + half_h))
+            zmin = int(round(idx_z - half_d));
+            zmax = int(round(idx_z + half_d))
+
+            xmin, xmax = max(0, xmin), min(size[0], xmax)
+            ymin, ymax = max(0, ymin), min(size[1], ymax)
+            zmin, zmax = max(0, zmin), min(size[2], zmax)
+
+            if xmax <= xmin or ymax <= ymin or zmax <= zmin:
+                print(f"⚠️ box {i} 转换后越界或尺寸非法，跳过: {box}")
+                continue
+
+            mask[zmin:zmax, ymin:ymax, xmin:xmax] = 1
+            print(f"📌 box {i} 世界坐标(cx,cy,cz)={cx:.1f},{cy:.1f},{cz:.1f} "
+                  f"-> 体素索引 x:[{xmin},{xmax}) y:[{ymin},{ymax}) z:[{zmin},{zmax})")
 
         return mask

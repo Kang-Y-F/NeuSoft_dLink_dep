@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" remoteFilesAllowedToDisappearOnAutoupload="false">
+  <component name="PublishConfigData" serverName="root@connect.westc.seetacloud.com:21067 password (7)" remoteFilesAllowedToDisappearOnAutoupload="false">
     <serverData>
+      <paths name="dLink_dep">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/dLink_dep" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
       <paths name="root@connect.westc.seetacloud.com:21067 password">
         <serverdata>
           <mappings>
@@ -34,6 +41,20 @@
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@connect.westc.seetacloud.com:21067 password (6)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/autodl-tmp/dLink_dep" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@connect.westc.seetacloud.com:21067 password (7)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/autodl-tmp/dLink_dep" local="$PROJECT_DIR$" />
           </mappings>
         </serverdata>
       </paths>

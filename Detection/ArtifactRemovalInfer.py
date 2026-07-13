@@ -267,10 +267,12 @@ class ArtifactRemovalInfer:
         # 加权融合：金属附近用Xout，远处用原图ct_slice
         final_out = Xout * blend_region + ct_slice.astype(np.float32) * (1 - blend_region)
 
-        plt.imsave('D:/temp_debug/debug_mask.png', mask_slice, cmap='gray')
-        plt.imsave('D:/temp_debug/debug_ct.png', np.clip(ct_slice, -200, 1000), cmap='gray')
-        plt.imsave('D:/temp_debug/debug_blend_region.png', blend_region, cmap='gray')
-        plt.imsave('D:/temp_debug/debug_xout.png', Xout, cmap='gray')
+        debug_dir = '/root/autodl-tmp/temp_debug'
+        os.makedirs(debug_dir, exist_ok=True)
+        plt.imsave(f'{debug_dir}/debug_mask.png', mask_slice, cmap='gray')
+        plt.imsave(f'{debug_dir}/debug_ct.png', np.clip(ct_slice, -200, 1000), cmap='gray')
+        plt.imsave(f'{debug_dir}/debug_blend_region.png', blend_region, cmap='gray')
+        plt.imsave(f'{debug_dir}/debug_xout.png', Xout, cmap='gray')
         print(f"mask覆盖比例: {mask_slice.sum() / mask_slice.size * 100:.1f}%")
 
         return final_out
